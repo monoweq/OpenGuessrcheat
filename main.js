@@ -9,13 +9,35 @@
 // @run-at       document-start
 // @license MIT
 // ==/UserScript==
+
+// ==UserScript==
+// @name         OpenGuessr cheat
+// @namespace    monowe
+// @version      1.3
+// @description  Easy to use location hack/cheat
+// @match        https://www.openguessr.com/*
+// @match        https://openguessr.com/*
+// @grant        none
+// @run-at       document-start
+// @license MIT
+// ==/UserScript==
  
 (function () {
     'use strict';
  
     // ─── CONFIG ───────────────────────────────────────────────────
     const ANIMATION_DURATION = 4000;
-    const MAP_SIZE = { w: 280, h: 220 };
+    const MAP_SIZES = {
+        small:  { w: 220, h: 160 },
+        medium: { w: 280, h: 220 },
+        large:  { w: 380, h: 300 },
+    };
+    const SETTINGS_KEY = 'monowe-settings';
+    const defaults = { size: 'medium', theme: 'dark' };
+    let settings = { ...defaults };
+    try { Object.assign(settings, JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}')); } catch {}
+    function saveSettings() { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); }
+    function getMapSize() { return MAP_SIZES[settings.size] || MAP_SIZES.medium; }
  
     // ─── LOAD LEAFLET ─────────────────────────────────────────────
     const leafletCSS = document.createElement('link');
@@ -337,70 +359,103 @@
             `;
             document.body.appendChild(overlay);
  
-            const style = document.createElement('style');
-            style.textContent = `
-                #monowe-welcome {
-                    position: fixed;
-                    inset: 0;
-                    z-index: 999999;
-                    background: #000;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    opacity: 1;
-                    transition: opacity 0.8s ease-out;
-                }
-                #monowe-welcome.fade-out {
-                    opacity: 0;
-                    pointer-events: none;
-                }
-                #monowe-particles {
-                    position: absolute;
-                    inset: 0;
-                    width: 100%;
-                    height: 100%;
-                }
-                .monowe-text {
-                    position: relative;
-                    z-index: 1;
-                    text-align: center;
-                    font-family: 'Segoe UI', system-ui, sans-serif;
-                    opacity: 0;
-                    animation: monowe-fadeIn 1.8s ease-out 0.6s forwards;
-                }
-                .monowe-made {
-                    display: block;
-                    font-size: 1.6rem;
-                    color: rgba(255,255,255,0.6);
-                    letter-spacing: 0.3em;
-                    text-transform: uppercase;
-                    margin-bottom: 0.4rem;
-                }
-                .monowe-name {
-                    display: block;
-                    font-size: 4rem;
-                    font-weight: 700;
-                    letter-spacing: 0.15em;
-                    background: linear-gradient(135deg, #00d4ff, #7b2fff, #ff2d95);
-                    -webkit-background-clip: text;
-                    -webkit-text-fill-color: transparent;
-                    background-clip: text;
-                    filter: drop-shadow(0 0 30px rgba(0,212,255,0.5))
-                            drop-shadow(0 0 60px rgba(123,47,255,0.3));
-                    animation: monowe-glow 2s ease-in-out infinite alternate;
-                }
-                @keyframes monowe-fadeIn {
-                    from { opacity: 0; transform: translateY(20px); }
-                    to   { opacity: 1; transform: translateY(0); }
-                }
-                @keyframes monowe-glow {
-                    from { filter: drop-shadow(0 0 20px rgba(0,212,255,0.4))
-                                   drop-shadow(0 0 40px rgba(123,47,255,0.2)); }
-                    to   { filter: drop-shadow(0 0 35px rgba(0,212,255,0.7))
-                                   drop-shadow(0 0 70px rgba(123,47,255,0.4)); }
-                }
-            `;
-            document.head.appendChild(style);
+                    const style = document.createElement('style');
+        const sz = getMapSize();
+        const c = getThemeColors();
+        style.textContent = `
+            #monowe-minimap {
+                position: fixed;
+                bottom: 20px;
+                right: 20px;
+                z-index: 999998;
+                width: ${sz.w}px;
+                background: ${c.bg};
+                border-radius: 12px;
+                overflow: hidden;
+                box-shadow: ${c.shadow};
+                font-family: 'Segoe UI', system-ui, sans-serif;
+                backdrop-filter: blur(12px);
+                cursor: move;
+                user-select: none;
+            }
+            .monowe-map-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                padding: 8px 12px;
+                background: ${c.headerBg};
+                color: ${c.text};
+                font-size: 0.8rem;
+                letter-spacing: 0.05em;
+            }
+            .monowe-header-left {
+                display: flex;
+                align-items: baseline;
+                gap: 6px;
+                min-width: 0;
+                flex: 1;
+            }
+            .monowe-header-right {
+                display: flex;
+                align-items: center;
+                gap: 2px;
+                flex-shrink: 0;
+            }
+            .monowe-loc-label {
+                color: ${c.textDim};
+                font-size: 0.75rem;
+                white-space: nowrap;
+            }
+            .monowe-loc-name {
+                color: ${c.locName};
+                font-size: 0.78rem;
+                font-weight: 600;
+                max-width: 140px;
+                display: inline-block;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+                vertical-align: bottom;
+            }
+            .monowe-map-header button {
+                background: none;
+                border: none;
+                color: ${c.textDim};
+                cursor: pointer;
+                font-size: 1.1rem;
+                padding: 0 4px;
+                line-height: 1;
+            }
+            .monowe-map-header button:hover {
+                color: ${c.btnHover};
+            }
+            #monowe-map-body {
+                height: ${sz.h}px;
+                transition: height 0.3s ease;
+            }
+            #monowe-map-body.collapsed {
+                height: 0;
+            }
+            #monowe-map-body .leaflet-container {
+                width: 100%;
+                height: 100%;
+                background: #1a1a2e;
+            }
+            #monowe-map-body .leaflet-control-zoom a {
+                background: rgba(18,18,18,0.9) !important;
+                color: #00d4ff !important;
+                border: 1px solid rgba(0,212,255,0.3) !important;
+                width: 28px !important;
+                height: 28px !important;
+                line-height: 28px !important;
+                font-size: 16px !important;
+            }
+            #monowe-map-body .leaflet-control-zoom a:hover {
+                background: rgba(0,212,255,0.2) !important;
+                color: #fff !important;
+            }
+        `;
+        document.head.appendChild(style);
  
             const canvas = document.getElementById('monowe-particles');
             const ctx = canvas.getContext('2d');
@@ -455,13 +510,161 @@
     }
  
     // ─── MINI-MAP ─────────────────────────────────────────────────
+    function getThemeColors() {
+        return settings.theme === 'light' ? {
+            bg: 'rgba(245,245,250,0.97)',
+            headerBg: 'rgba(0,0,0,0.06)',
+            text: 'rgba(20,20,30,0.9)',
+            textDim: 'rgba(20,20,30,0.5)',
+            accent: '#0077cc',
+            border: 'rgba(0,0,0,0.1)',
+            btnHover: '#0077cc',
+            shadow: '0 4px 24px rgba(0,0,0,0.15), 0 0 0 1px rgba(0,0,0,0.08)',
+            locName: '#0077cc',
+        } : {
+            bg: 'rgba(18,18,18,0.95)',
+            headerBg: 'rgba(0,0,0,0.4)',
+            text: 'rgba(255,255,255,0.85)',
+            textDim: 'rgba(255,255,255,0.45)',
+            accent: '#00d4ff',
+            border: 'rgba(255,255,255,0.08)',
+            btnHover: '#fff',
+            shadow: '0 4px 24px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.08)',
+            locName: '#00d4ff',
+        };
+    }
+ 
+    function applyTheme() {
+        const c = getThemeColors();
+        const el = document.getElementById('monowe-minimap');
+        if (!el) return;
+        el.style.background = c.bg;
+        el.style.boxShadow = c.shadow;
+        const header = el.querySelector('.monowe-map-header');
+        if (header) {
+            header.style.background = c.headerBg;
+            header.style.color = c.text;
+        }
+        const label = el.querySelector('.monowe-loc-label');
+        if (label) label.style.color = c.textDim;
+        const locName = el.querySelector('.monowe-loc-name');
+        if (locName) locName.style.color = c.locName;
+        const btns = el.querySelectorAll('.monowe-map-header button');
+        btns.forEach(b => b.style.color = c.textDim);
+    }
+ 
+    function applySize() {
+        const sz = getMapSize();
+        const el = document.getElementById('monowe-minimap');
+        if (!el) return;
+        el.style.width = sz.w + 'px';
+        const body = document.getElementById('monowe-map-body');
+        if (body && !body.classList.contains('collapsed')) body.style.height = sz.h + 'px';
+        if (mapObj && mapObj.map) setTimeout(() => mapObj.map.invalidateSize(), 350);
+    }
+ 
+    function toggleSettingsPanel() {
+        let panel = document.getElementById('monowe-settings-panel');
+        if (panel) { panel.remove(); return; }
+        const c = getThemeColors();
+        panel = document.createElement('div');
+        panel.id = 'monowe-settings-panel';
+        panel.innerHTML = `
+            <div class="monowe-settings-title">Settings</div>
+            <div class="monowe-settings-row">
+                <span>Size</span>
+                <div class="monowe-size-btns">
+                    <button data-size="small" class="${settings.size === 'small' ? 'active' : ''}">S</button>
+                    <button data-size="medium" class="${settings.size === 'medium' ? 'active' : ''}">M</button>
+                    <button data-size="large" class="${settings.size === 'large' ? 'active' : ''}">L</button>
+                </div>
+            </div>
+            <div class="monowe-settings-row">
+                <span>Theme</span>
+                <div class="monowe-theme-toggle">
+                    <button data-theme="dark" class="${settings.theme === 'dark' ? 'active' : ''}">Dark</button>
+                    <button data-theme="light" class="${settings.theme === 'light' ? 'active' : ''}">Light</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(panel);
+ 
+        const minimap = document.getElementById('monowe-minimap');
+        const rect = minimap.getBoundingClientRect();
+        panel.style.position = 'fixed';
+        panel.style.bottom = (window.innerHeight - rect.top + 8) + 'px';
+        panel.style.right = (window.innerWidth - rect.right) + 'px';
+ 
+        Object.assign(panel.style, {
+            background: c.bg, borderRadius: '10px', padding: '12px 14px',
+            zIndex: '999999', boxShadow: c.shadow,
+            fontFamily: "'Segoe UI', system-ui, sans-serif", color: c.text, minWidth: '170px',
+        });
+        panel.querySelector('.monowe-settings-title').style.cssText =
+            'font-size:0.7rem;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:10px;color:' + c.textDim;
+        panel.querySelectorAll('.monowe-settings-row').forEach(r => {
+            r.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:0.78rem;';
+        });
+        panel.querySelectorAll('.monowe-settings-row > span').forEach(s => s.style.color = c.textDim);
+        panel.querySelectorAll('.monowe-size-btns, .monowe-theme-toggle').forEach(g => {
+            g.style.cssText = 'display:flex;gap:4px;';
+        });
+        panel.querySelectorAll('button').forEach(b => {
+            b.style.cssText = `background:${c.headerBg};border:1px solid ${c.border};color:${c.textDim};border-radius:6px;padding:3px 10px;cursor:pointer;font-size:0.72rem;font-family:inherit;transition:all 0.15s;`;
+            b.addEventListener('mouseenter', () => { b.style.color = c.text; b.style.borderColor = c.accent; });
+            b.addEventListener('mouseleave', () => { if (!b.classList.contains('active')) { b.style.color = c.textDim; b.style.borderColor = c.border; }});
+        });
+        panel.querySelectorAll('button.active').forEach(b => {
+            b.style.background = c.accent;
+            b.style.color = settings.theme === 'light' ? '#fff' : '#000';
+            b.style.borderColor = c.accent;
+        });
+ 
+        panel.querySelectorAll('[data-size]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                settings.size = btn.dataset.size;
+                saveSettings();
+                applySize();
+                panel.remove();
+                toggleSettingsPanel();
+            });
+        });
+        panel.querySelectorAll('[data-theme]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                settings.theme = btn.dataset.theme;
+                saveSettings();
+                applyTheme();
+                panel.remove();
+                toggleSettingsPanel();
+            });
+        });
+ 
+        setTimeout(() => {
+            const handler = (e) => {
+                if (!panel.contains(e.target) && !e.target.closest('#monowe-settings-btn')) {
+                    panel.remove();
+                    document.removeEventListener('mousedown', handler);
+                }
+            };
+            document.addEventListener('mousedown', handler);
+        }, 50);
+    }
+ 
     function createMiniMap() {
+        const sz = getMapSize();
+        const c = getThemeColors();
         const container = document.createElement('div');
         container.id = 'monowe-minimap';
         container.innerHTML = `
             <div class="monowe-map-header">
-                <span>Your Location</span>
-                <button id="monowe-map-toggle">−</button>
+                <div class="monowe-header-left">
+                    <span class="monowe-loc-label">Your Location:</span>
+                    <span id="monowe-location-name" class="monowe-loc-name">...</span>
+                </div>
+                <div class="monowe-header-right">
+                    <button id="monowe-settings-btn" title="Settings">\u2699</button>
+                    <button id="monowe-map-toggle">\u2212</button>
+                </div>
             </div>
             <div id="monowe-map-body"></div>
         `;
@@ -474,11 +677,11 @@
                 bottom: 20px;
                 right: 20px;
                 z-index: 999998;
-                width: ${MAP_SIZE.w}px;
-                background: rgba(18,18,18,0.95);
+                width: ${sz.w}px;
+                background: ${c.bg};
                 border-radius: 12px;
                 overflow: hidden;
-                box-shadow: 0 4px 24px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.08);
+                box-shadow: ${c.shadow};
                 font-family: 'Segoe UI', system-ui, sans-serif;
                 backdrop-filter: blur(12px);
                 cursor: move;
@@ -489,25 +692,54 @@
                 justify-content: space-between;
                 align-items: center;
                 padding: 8px 12px;
-                background: rgba(0,0,0,0.4);
-                color: rgba(255,255,255,0.85);
+                background: ${c.headerBg};
+                color: ${c.text};
                 font-size: 0.8rem;
                 letter-spacing: 0.05em;
+            }
+            .monowe-header-left {
+                display: flex;
+                align-items: baseline;
+                gap: 6px;
+                min-width: 0;
+                flex: 1;
+            }
+            .monowe-header-right {
+                display: flex;
+                align-items: center;
+                gap: 2px;
+                flex-shrink: 0;
+            }
+            .monowe-loc-label {
+                color: ${c.textDim};
+                font-size: 0.75rem;
+                white-space: nowrap;
+            }
+            .monowe-loc-name {
+                color: ${c.locName};
+                font-size: 0.78rem;
+                font-weight: 600;
+                max-width: 140px;
+                display: inline-block;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+                vertical-align: bottom;
             }
             .monowe-map-header button {
                 background: none;
                 border: none;
-                color: rgba(255,255,255,0.6);
+                color: ${c.textDim};
                 cursor: pointer;
                 font-size: 1.1rem;
                 padding: 0 4px;
                 line-height: 1;
             }
             .monowe-map-header button:hover {
-                color: #fff;
+                color: ${c.btnHover};
             }
             #monowe-map-body {
-                height: ${MAP_SIZE.h}px;
+                height: ${sz.h}px;
                 transition: height 0.3s ease;
             }
             #monowe-map-body.collapsed {
@@ -535,11 +767,17 @@
         document.head.appendChild(style);
  
         const toggleBtn = document.getElementById('monowe-map-toggle');
+        const settingsBtn = document.getElementById('monowe-settings-btn');
         const mapBody = document.getElementById('monowe-map-body');
         toggleBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             const collapsed = mapBody.classList.toggle('collapsed');
-            toggleBtn.textContent = collapsed ? '+' : '−';
+            toggleBtn.textContent = collapsed ? '+' : '\u2212';
+            if (!collapsed) applySize();
+        });
+        settingsBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            toggleSettingsPanel();
         });
  
         let isDragging = false, offsetX, offsetY;
@@ -579,7 +817,7 @@
         const map = L.map('monowe-map-body', {
             zoomControl: true,
             attributionControl: false,
-        }).setView([20, 0], 1);
+        }).setView([20, 0], 5);
  
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             maxZoom: 19,
@@ -605,6 +843,41 @@
         map.setView(latlng, 12, { animate: true, duration: 0.8 });
     }
  
+ 
+    // --- REVERSE GEOCODING ---
+    let geocodeTimer = null;
+    let lastGeocoded = null;
+ 
+    async function reverseGeocode(lat, lng) {
+        const key = lat.toFixed(3) + ',' + lng.toFixed(3);
+        if (key === lastGeocoded) return;
+        lastGeocoded = key;
+ 
+        try {
+            const resp = await fetch(
+                'https://nominatim.openstreetmap.org/reverse?format=json&lat=' + lat + '&lon=' + lng + '&zoom=10&accept-language=en',
+                { headers: { 'User-Agent': 'monowe-openguessr/1.2' } }
+            );
+            const data = await resp.json();
+            const el = document.getElementById('monowe-location-name');
+            if (!el) return;
+ 
+            const addr = data.address || {};
+            const city = addr.city || addr.town || addr.village || addr.hamlet || addr.municipality || '';
+            const country = addr.country || '';
+            const region = addr.state || addr.region || '';
+ 
+            let label = city || region || country || (data.display_name || '').split(',').slice(0, 2).join(', ') || '...';
+            if (city && country && city !== country) label = city + ', ' + country;
+            else if (region && country && region !== country) label = region + ', ' + country;
+ 
+            el.textContent = label;
+            el.title = data.display_name || '';
+        } catch (e) {
+            console.log('[monowe] geocode error:', e);
+        }
+    }
+ 
     // ─── MAIN ─────────────────────────────────────────────────────
     let mapObj = null;
  
@@ -616,6 +889,9 @@
             if (mapObj) {
                 updateMap(mapObj, coords);
             }
+            // Reverse geocode location name
+            clearTimeout(geocodeTimer);
+            geocodeTimer = setTimeout(() => reverseGeocode(coords.lat, coords.lng), 300);
             // If map not ready yet, coords are in lastCoords — will be applied below
         });
  
@@ -637,6 +913,7 @@
         if (lastCoords) {
             console.log('[monowe] applying early coords:', lastCoords.lat, lastCoords.lng);
             updateMap(mapObj, lastCoords);
+            reverseGeocode(lastCoords.lat, lastCoords.lng);
         }
  
         // Scan page HTML for embedded coordinates
