@@ -1,18 +1,6 @@
 // ==UserScript==
 // @name         OpenGuessr cheat
 // @namespace    monowe
-// @version      1.2
-// @description  Easy to use location hack/cheat
-// @match        https://www.openguessr.com/*
-// @match        https://openguessr.com/*
-// @grant        none
-// @run-at       document-start
-// @license MIT
-// ==/UserScript==
-
-// ==UserScript==
-// @name         OpenGuessr cheat
-// @namespace    monowe
 // @version      1.3
 // @description  Easy to use location hack/cheat
 // @match        https://www.openguessr.com/*
