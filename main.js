@@ -1,69 +1,232 @@
 // ==UserScript==
-// @name         OpenGuessr cheat
+// @name         OpenGuessr cheat v2.0
 // @namespace    monowe
-// @version      1.4
-// @description  Easy to use location hack/cheat
+// @version      16.0
+// @description  Improved location hack/cheat with better error handling and performance
 // @match        https://www.openguessr.com/*
 // @match        https://openguessr.com/*
 // @grant        none
 // @run-at       document-start
 // @license MIT
-// @downloadURL https://update.greasyfork.org/scripts/578787/OpenGuessr%20cheat.user.js
-// @updateURL https://update.greasyfork.org/scripts/578787/OpenGuessr%20cheat.meta.js
+// @downloadURL https://update.greasyfork.org/scripts/578787/OpenGuessr%20cheat%20v20.user.js
+// @updateURL https://update.greasyfork.org/scripts/578787/OpenGuessr%20cheat%20v20.meta.js
 // ==/UserScript==
 
 (function () {
     'use strict';
 
+    // ─── CONFIG ──────────────────────────────────────────────────
+    const DEBUG = true;
+    const debugLogs = [];
+    const MAX_LOGS = 500;
+
+    function log(...args) {
+        const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+        const entry = { time: new Date().toLocaleTimeString(), msg };
+        debugLogs.push(entry);
+        if (debugLogs.length > MAX_LOGS) debugLogs.shift();
+        console.log('[monowe]', ...args);
+        updateDebugConsole();
+    }
+
     const ANIMATION_DURATION = 2500;
     const MAP_SIZES = {
+        tiny:   { w: 180, h: 130 },
         small:  { w: 220, h: 160 },
         medium: { w: 280, h: 220 },
         large:  { w: 380, h: 300 },
+        xlarge: { w: 480, h: 380 },
+        huge:   { w: 600, h: 480 },
     };
     const SETTINGS_KEY = 'monowe-settings';
-    const defaults = { size: 'medium', theme: 'dark', opacity: 95, showWelcome: true, hotkey: 'KeyM' };
+    const HISTORY_KEY = 'monowe-history';
+    const defaults = {
+        size: 'medium', theme: 'dark', opacity: 95, showWelcome: true, hotkey: 'KeyM',
+        mapProvider: 'osm', coordFormat: 'decimal',
+        compactMode: false, autoHide: false, autoHideDelay: 10,
+        showCountry: true, showWikipedia: true,
+    };
     let settings = { ...defaults };
+    const isFirstRun = !localStorage.getItem(SETTINGS_KEY);
     try { Object.assign(settings, JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}')); } catch {}
+    if (isFirstRun) { settings.mapProvider = 'osm'; saveSettings(); }
     function saveSettings() { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); }
     function getMapSize() { return MAP_SIZES[settings.size] || MAP_SIZES.medium; }
 
-    // ─── LOAD LEAFLET ─────────────────────────────────────────────
-    const leafletCSS = document.createElement('link');
-    leafletCSS.rel = 'stylesheet';
-    leafletCSS.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
-    (document.head || document.documentElement).appendChild(leafletCSS);
+    // ─── LOCATION HISTORY ────────────────────────────────────────
+    let locationHistory = [];
+    try { locationHistory = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]'); } catch {}
+    const MAX_HISTORY = 50;
+    function saveHistory() { localStorage.setItem(HISTORY_KEY, JSON.stringify(locationHistory.slice(-MAX_HISTORY))); }
+    function addToHistory(lat, lng, name, country) {
+        const entry = { lat, lng, name: name || '...', country: country || '', time: Date.now() };
+        locationHistory.push(entry);
+        if (locationHistory.length > MAX_HISTORY) locationHistory.shift();
+        saveHistory();
+    }
 
-    const leafletJS = document.createElement('script');
-    leafletJS.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
-    (document.head || document.documentElement).appendChild(leafletJS);
+    // ─── UTILITIES ───────────────────────────────────────────────
+    function throttle(fn, ms) {
+        let last = 0;
+        return function (...args) {
+            const now = Date.now();
+            if (now - last >= ms) {
+                last = now;
+                return fn.apply(this, args);
+            }
+        };
+    }
 
-    // ─── COORDINATE SYSTEM ────────────────────────────────────────
+    function isValidCoord(lat, lng) {
+        return isFinite(lat) && isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180 && !(lat === 0 && lng === 0);
+    }
+
+    // ─── COORDINATE FORMATS ──────────────────────────────────────
+    function toDMS(lat, lng) {
+        const dms = (val, pos, neg) => {
+            const abs = Math.abs(val);
+            const d = Math.floor(abs);
+            const m = Math.floor((abs - d) * 60);
+            const s = ((abs - d - m/60) * 3600).toFixed(1);
+            return `${d}°${String(m).padStart(2,'0')}'${String(s).padStart(5,'0')}"${val >= 0 ? pos : neg}`;
+        };
+        return dms(lat, 'N', 'S') + ' ' + dms(lng, 'E', 'W');
+    }
+
+    function toGoogleMapsLink(lat, lng) {
+        return `https://www.google.com/maps/@${lat},${lng},15z`;
+    }
+
+    function toOSMLink(lat, lng) {
+        return `https://www.openstreetmap.org/#map=15/${lat}/${lng}`;
+    }
+
+    function toYandexLink(lat, lng) {
+        return `https://yandex.com/maps/?ll=${lng},${lat}&z=15&pt=${lng},${lat},pm2rdm`;
+    }
+
+    function formatCoord(lat, lng) {
+        switch (settings.coordFormat) {
+            case 'dms': return toDMS(lat, lng);
+            case 'google': return toGoogleMapsLink(lat, lng);
+            case 'osm': return toOSMLink(lat, lng);
+            case 'yandex': return toYandexLink(lat, lng);
+            default: return lat.toFixed(6) + ', ' + lng.toFixed(6);
+        }
+    }
+
+    function getCountryFlag(countryCode) {
+        if (!countryCode || countryCode.length !== 2) return '';
+        const code = countryCode.toUpperCase();
+        return String.fromCodePoint(...[...code].map(c => 0x1F1E6 + c.charCodeAt(0) - 65));
+    }
+
+    function getWikipediaLink(name, country) {
+        const q = encodeURIComponent(name + (country ? ' ' + country : ''));
+        return `https://en.wikipedia.org/wiki/Special:Search?search=${q}`;
+    }
+
+    // ─── MAP PROVIDERS ───────────────────────────────────────────
+    const MAP_PROVIDERS = {
+        osm: { name: 'OpenStreetMap', url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', maxZoom: 19, attribution: '© OpenStreetMap' },
+        osmDark: { name: 'OSM Dark', url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', maxZoom: 19, attribution: '© CartoDB', subdomains: 'abcd' },
+        osmLight: { name: 'OSM Light', url: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', maxZoom: 19, attribution: '© CartoDB', subdomains: 'abcd' },
+        satellite: { name: 'Satellite', url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', maxZoom: 18, attribution: '© Esri' },
+        terrain: { name: 'Terrain', url: 'https://tile.opentopomap.org/{z}/{x}/{y}.png', maxZoom: 17, attribution: '© OpenTopoMap' },
+    };
+
+    // ─── COUNTRY FLAGS ───────────────────────────────────────────
+    const COUNTRY_CODES = {
+        'Afghanistan':'AF','Albania':'AL','Algeria':'DZ','Argentina':'AR','Armenia':'AM',
+        'Australia':'AU','Austria':'AT','Azerbaijan':'AZ','Bangladesh':'BD','Belarus':'BY',
+        'Belgium':'BE','Bolivia':'BO','Brazil':'BR','Bulgaria':'BG','Cambodia':'KH',
+        'Cameroon':'CM','Canada':'CA','Chile':'CL','China':'CN','Colombia':'CO',
+        'Costa Rica':'CR','Croatia':'HR','Cuba':'CU','Czech Republic':'CZ','Denmark':'DK',
+        'Ecuador':'EC','Egypt':'EG','Estonia':'EE','Ethiopia':'ET','Finland':'FI',
+        'France':'FR','Germany':'DE','Ghana':'GH','Greece':'GR','Guatemala':'GT',
+        'Honduras':'HN','Hungary':'HU','Iceland':'IS','India':'IN','Indonesia':'ID',
+        'Iran':'IR','Iraq':'IQ','Ireland':'IE','Israel':'IL','Italy':'IT',
+        'Jamaica':'JM','Japan':'JP','Jordan':'JO','Kazakhstan':'KZ','Kenya':'KE',
+        'Kuwait':'KW','Latvia':'LV','Lithuania':'LT','Luxembourg':'LU','Madagascar':'MG',
+        'Malaysia':'MY','Mexico':'MX','Morocco':'MA','Nepal':'NP','Netherlands':'NL',
+        'New Zealand':'NZ','Nigeria':'NG','Norway':'NO','Pakistan':'PK','Panama':'PA',
+        'Paraguay':'PY','Peru':'PE','Philippines':'PH','Poland':'PL','Portugal':'PT',
+        'Romania':'RO','Russia':'RU','Saudi Arabia':'SA','Serbia':'RS','Singapore':'SG',
+        'Slovakia':'SK','Slovenia':'SI','South Africa':'ZA','South Korea':'KR','Spain':'ES',
+        'Sri Lanka':'LK','Sweden':'SE','Switzerland':'CH','Taiwan':'TW','Thailand':'TH',
+        'Tunisia':'TN','Turkey':'TR','UAE':'AE','Ukraine':'UA','United Kingdom':'GB',
+        'United States':'US','Uruguay':'UY','Uzbekistan':'UZ','Venezuela':'VE','Vietnam':'VN',
+    };
+
+    // ─── CLEANUP SYSTEM ──────────────────────────────────────────
+    const cleanupFns = [];
+    const intervals = [];
+
+    function trackInterval(fn, ms) {
+        const id = setInterval(fn, ms);
+        intervals.push(id);
+        return id;
+    }
+
+    function cleanupAll() {
+        for (const fn of cleanupFns) {
+            try { fn(); } catch (e) { log('cleanup error:', e); }
+        }
+        for (const id of intervals) clearInterval(id);
+        intervals.length = 0;
+    }
+
+    window.addEventListener('beforeunload', cleanupAll);
+
+    // ─── LOAD LEAFLET ────────────────────────────────────────────
+    function loadLeaflet() {
+        return new Promise((resolve, reject) => {
+            if (window.L) { resolve(); return; }
+
+            const leafletCSS = document.createElement('link');
+            leafletCSS.rel = 'stylesheet';
+            leafletCSS.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+            (document.head || document.documentElement).appendChild(leafletCSS);
+
+            const leafletJS = document.createElement('script');
+            leafletJS.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+            leafletJS.onload = resolve;
+            leafletJS.onerror = () => reject(new Error('Failed to load Leaflet'));
+            (document.head || document.documentElement).appendChild(leafletJS);
+
+            // Timeout fallback
+            setTimeout(() => {
+                if (!window.L) reject(new Error('Leaflet load timeout'));
+            }, 10000);
+        });
+    }
+
+    // ─── COORDINATE SYSTEM ───────────────────────────────────────
     const listeners = [];
     let lastCoords = null;
 
     function emitCoords(coords) {
-        if (!coords || !isFinite(coords.lat) || !isFinite(coords.lng)) return;
-        if (coords.lat === 0 && coords.lng === 0) return;
+        if (!coords || !isValidCoord(coords.lat, coords.lng)) return;
         if (lastCoords && lastCoords.lat === coords.lat && lastCoords.lng === coords.lng) return;
         lastCoords = coords;
-        console.log('[monowe] coords found:', coords.lat, coords.lng);
-        for (const fn of listeners) fn(coords);
+        log('coords found:', coords.lat, coords.lng);
+        for (const fn of listeners) {
+            try { fn(coords); } catch (e) { log('listener error:', e); }
+        }
     }
 
     // ─── METHOD 1: Hook Google Maps API ──────────────────────────
     function hookGoogleMapsAPI() {
-        const check = setInterval(() => {
+        const check = trackInterval(() => {
             if (!window.google || !window.google.maps) return;
             clearInterval(check);
 
-            console.log('[monowe] Google Maps API detected, hooking...');
+            log('Google Maps API detected, hooking...');
             const SVP = window.google.maps.StreetViewPanorama;
             if (!SVP) return;
 
             const instances = new Set();
 
-            const origCtor = SVP;
             const handler = {
                 construct(target, args) {
                     const instance = new target(...args);
@@ -73,9 +236,9 @@
                     return instance;
                 }
             };
-            const proxied = new Proxy(origCtor, handler);
+            const proxied = new Proxy(SVP, handler);
             window.google.maps.StreetViewPanorama = proxied;
-            proxied.prototype = origCtor.prototype;
+            proxied.prototype = SVP.prototype;
 
             const scanExisting = () => {
                 try {
@@ -93,7 +256,7 @@
                             }
                         }
                     }
-                } catch {}
+                } catch (e) { log('scanExisting error:', e); }
             };
 
             function readPosition(pano) {
@@ -106,7 +269,7 @@
                             if (lat && lng) emitCoords({ lat, lng });
                         }
                     }
-                } catch {}
+                } catch (e) { log('readPosition error:', e); }
             }
 
             function hookInstance(pano) {
@@ -132,30 +295,31 @@
                 }
             }
 
-            const scanInterval = setInterval(() => {
+            trackInterval(() => {
                 scanExisting();
                 for (const pano of instances) readPosition(pano);
             }, 2000);
 
             scanExisting();
             for (const pano of instances) readPosition(pano);
-
-            cleanupFns.push(() => clearInterval(scanInterval));
         }, 500);
     }
 
     // ─── METHOD 2: Intercept fetch/XHR ───────────────────────────
     function hookNetwork() {
+        const coordPatterns = [
+            /"(?:lat(?:itude)?|y)"\s*:\s*(-?\d+\.?\d*)\s*,\s*"(?:l(?:on|ng)(?:g(?:itude)?|)|x)"\s*:\s*(-?\d+\.?\d*)/i,
+            /"(?:l(?:on|ng)(?:g(?:itude)?|)|x)"\s*:\s*(-?\d+\.?\d*)\s*,\s*"(?:lat(?:itude)?|y)"\s*:\s*(-?\d+\.?\d*)/i,
+            /"lat"\s*:\s*(-?\d+\.?\d*)\s*,\s*"lon"\s*:\s*(-?\d+\.?\d*)/i,
+            /"latitude"\s*:\s*(-?\d+\.?\d*)\s*,\s*"longitude"\s*:\s*(-?\d+\.?\d*)/i,
+        ];
+
         function extractCoords(text) {
-            const patterns = [
-                /"lat(?:itude)?"\s*:\s*(-?\d+\.?\d*)\s*,\s*"(?:lng|lo(?:ng|n(?:g|itude)?))"\s*:\s*(-?\d+\.?\d*)/i,
-                /"(?:lng|lo(?:ng|n(?:g|itude)?))"\s*:\s*(-?\d+\.?\d*)\s*,\s*"lat(?:itude)?"\s*:\s*(-?\d+\.?\d*)/i,
-            ];
-            for (const re of patterns) {
+            for (const re of coordPatterns) {
                 const m = text.match(re);
                 if (m) {
                     const a = parseFloat(m[1]), b = parseFloat(m[2]);
-                    if (Math.abs(a) <= 90 && Math.abs(b) <= 180 && (a !== 0 || b !== 0)) return { lat: a, lng: b };
+                    if (isValidCoord(a, b)) return { lat: a, lng: b };
                 }
             }
             return null;
@@ -163,6 +327,26 @@
 
         const origFetch = window.fetch;
         window.fetch = async function (...args) {
+            let [url, opts] = args;
+            const urlStr = typeof url === 'string' ? url : (url instanceof Request ? url.url : String(url));
+            const method = opts?.method || (url instanceof Request ? url.method : 'GET');
+            const bodyRaw = opts?.body || (url instanceof Request ? url.body : null);
+
+            log('fetch:', method, urlStr.substring(0, 120));
+
+            // Show ALL bodies for debugging
+            if (bodyRaw) {
+                let bodyStr = '';
+                if (typeof bodyRaw === 'string') bodyStr = bodyRaw;
+                else if (bodyRaw instanceof URLSearchParams) bodyStr = bodyRaw.toString();
+                else if (bodyRaw instanceof ArrayBuffer) bodyStr = '(arraybuffer ' + bodyRaw.byteLength + ')';
+                else bodyStr = '(' + typeof bodyRaw + ')';
+
+                if (bodyStr.length > 0 && !bodyStr.startsWith('(')) {
+                    log('fetch body:', bodyStr.substring(0, 300));
+                }
+            }
+
             const resp = await origFetch.apply(this, args);
             try {
                 const clone = resp.clone();
@@ -178,6 +362,7 @@
         const origSend = XMLHttpRequest.prototype.send;
         XMLHttpRequest.prototype.open = function (m, u, ...r) {
             this._mUrl = u;
+            this._mMethod = m;
             return origOpen.call(this, m, u, ...r);
         };
         XMLHttpRequest.prototype.send = function (...a) {
@@ -211,11 +396,10 @@
             return origAppendChild.call(this, node);
         };
 
-        const scanInterval = setInterval(scanGlobalScope, 3000);
+        trackInterval(scanGlobalScope, 3000);
 
         cleanupFns.push(() => {
             Node.prototype.appendChild = origAppendChild;
-            clearInterval(scanInterval);
         });
     }
 
@@ -225,6 +409,7 @@
                 try {
                     const obj = window[key];
                     if (!obj || typeof obj !== 'object') continue;
+
                     if (typeof obj.getPosition === 'function') {
                         const pos = obj.getPosition();
                         if (pos) {
@@ -261,6 +446,8 @@
             if (cbll) emitCoords({ lat: parseFloat(cbll[1]), lng: parseFloat(cbll[2]) });
             const loc = url.match(/location=(-?\d+\.?\d*),(-?\d+\.?\d*)/);
             if (loc) emitCoords({ lat: parseFloat(loc[1]), lng: parseFloat(loc[2]) });
+            const ll = url.match(/[?&]ll=(-?\d+\.?\d*),(-?\d+\.?\d*)/);
+            if (ll) emitCoords({ lat: parseFloat(ll[1]), lng: parseFloat(ll[2]) });
         }
 
         const observer = new MutationObserver((mutations) => {
@@ -303,18 +490,20 @@
             /cbll=(-?\d+\.?\d*),(-?\d+\.?\d*)/,
             /location=(-?\d+\.?\d*),(-?\d+\.?\d*)/,
             /!3d(-?\d+\.?\d*)!4d(-?\d+\.?\d*)/,
+            /@(-?\d+\.?\d*),(-?\d+\.?\d*)/,
+            /"lat"\s*:\s*(-?\d+\.?\d*)\s*,\s*"lng"\s*:\s*(-?\d+\.?\d*)/,
         ];
         for (const re of patterns) {
             const m = html.match(re);
             if (m) {
-                emitCoords({ lat: parseFloat(m[1]), lng: parseFloat(m[2]) });
-                return;
+                const lat = parseFloat(m[1]), lng = parseFloat(m[2]);
+                if (isValidCoord(lat, lng)) {
+                    emitCoords({ lat, lng });
+                    return;
+                }
             }
         }
     }
-
-    // ─── CLEANUP ─────────────────────────────────────────────────
-    const cleanupFns = [];
 
     // ─── ANIMATION OVERLAY ───────────────────────────────────────
     function showWelcomeAnimation() {
@@ -560,6 +749,17 @@
                 color: #fff !important;
             }
             #monowe-minimap.hidden { display: none !important; }
+            #monowe-minimap.error-state {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                height: auto;
+                min-height: 60px;
+                padding: 12px;
+                text-align: center;
+                color: ${c.textDim};
+                font-size: 0.75rem;
+            }
         `;
         document.head.appendChild(mapStyleEl);
     }
@@ -576,6 +776,25 @@
         const body = document.getElementById('monowe-map-body');
         if (body && !body.classList.contains('collapsed')) body.style.height = sz.h + 'px';
         if (mapObj && mapObj.map) setTimeout(() => mapObj.map.invalidateSize(), 350);
+        // Update settings panel position
+        repositionSettingsPanel();
+    }
+
+    function repositionSettingsPanel() {
+        const panel = document.getElementById('monowe-settings-panel');
+        const minimap = document.getElementById('monowe-minimap');
+        if (!panel || !minimap) return;
+        const rect = minimap.getBoundingClientRect();
+        const panelHeight = 400;
+        const spaceAbove = rect.top;
+        if (spaceAbove > panelHeight + 10) {
+            panel.style.bottom = (window.innerHeight - rect.top + 8) + 'px';
+            panel.style.top = '';
+        } else {
+            panel.style.top = (rect.bottom + 8) + 'px';
+            panel.style.bottom = '';
+        }
+        panel.style.right = (window.innerWidth - rect.right) + 'px';
     }
 
     function toggleMinimap() {
@@ -631,9 +850,12 @@
             <div class="monowe-settings-row">
                 <span>Size</span>
                 <div class="monowe-size-btns">
+                    <button data-size="tiny" class="${settings.size === 'tiny' ? 'active' : ''}">XS</button>
                     <button data-size="small" class="${settings.size === 'small' ? 'active' : ''}">S</button>
                     <button data-size="medium" class="${settings.size === 'medium' ? 'active' : ''}">M</button>
                     <button data-size="large" class="${settings.size === 'large' ? 'active' : ''}">L</button>
+                    <button data-size="xlarge" class="${settings.size === 'xlarge' ? 'active' : ''}">XL</button>
+                    <button data-size="huge" class="${settings.size === 'huge' ? 'active' : ''}">XXL</button>
                 </div>
             </div>
             <div class="monowe-settings-row">
@@ -642,6 +864,22 @@
                     <button data-theme="dark" class="${settings.theme === 'dark' ? 'active' : ''}">Dark</button>
                     <button data-theme="light" class="${settings.theme === 'light' ? 'active' : ''}">Light</button>
                 </div>
+            </div>
+            <div class="monowe-settings-row">
+                <span>Map</span>
+                <select data-setting="mapProvider" style="background:${c.headerBg};color:${c.text};border:1px solid ${c.border};border-radius:6px;padding:3px 6px;font-size:0.72rem;font-family:inherit;">
+                    ${Object.entries(MAP_PROVIDERS).map(([k, v]) => `<option value="${k}" ${settings.mapProvider === k ? 'selected' : ''}>${v.name}</option>`).join('')}
+                </select>
+            </div>
+            <div class="monowe-settings-row">
+                <span>Coords</span>
+                <select data-setting="coordFormat" style="background:${c.headerBg};color:${c.text};border:1px solid ${c.border};border-radius:6px;padding:3px 6px;font-size:0.72rem;font-family:inherit;">
+                    <option value="decimal" ${settings.coordFormat === 'decimal' ? 'selected' : ''}>Decimal</option>
+                    <option value="dms" ${settings.coordFormat === 'dms' ? 'selected' : ''}>DMS</option>
+                    <option value="google" ${settings.coordFormat === 'google' ? 'selected' : ''}>Google Maps</option>
+                    <option value="osm" ${settings.coordFormat === 'osm' ? 'selected' : ''}>OpenStreetMap</option>
+                    <option value="yandex" ${settings.coordFormat === 'yandex' ? 'selected' : ''}>Yandex Maps</option>
+                </select>
             </div>
             <div class="monowe-settings-row">
                 <span>Opacity</span>
@@ -654,8 +892,27 @@
                     style="min-width:50px">${settings.showWelcome ? 'On' : 'Off'}</button>
             </div>
             <div class="monowe-settings-row">
+                <span>Country Flag</span>
+                <button data-setting="showCountry" class="${settings.showCountry ? 'active' : ''}"
+                    style="min-width:50px">${settings.showCountry ? 'On' : 'Off'}</button>
+            </div>
+            <div class="monowe-settings-row">
+                <span>Compact</span>
+                <button data-setting="compactMode" class="${settings.compactMode ? 'active' : ''}"
+                    style="min-width:50px">${settings.compactMode ? 'On' : 'Off'}</button>
+            </div>
+            <div class="monowe-settings-row">
+                <span>History</span>
+                <button id="monowe-show-history" style="background:${c.headerBg};border:1px solid ${c.border};color:${c.accent};border-radius:6px;padding:3px 10px;cursor:pointer;font-size:0.72rem;">${locationHistory.length} locations</button>
+            </div>
+            <div class="monowe-settings-row">
                 <span>Hotkey</span>
                 <span style="color:${c.accent};font-size:0.72rem;font-family:monospace">${settings.hotkey.replace('Key','')}</span>
+            </div>
+            <div style="height:1px;background:${c.border};margin:8px 0;"></div>
+            <div class="monowe-settings-row">
+                <span>Reset</span>
+                <button id="monowe-reset-settings" style="background:rgba(255,100,100,0.15);border:1px solid rgba(255,100,100,0.3);color:#ff6b6b;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:0.72rem;">Reset All</button>
             </div>
         `;
         document.body.appendChild(panel);
@@ -663,7 +920,14 @@
         const minimap = document.getElementById('monowe-minimap');
         const rect = minimap.getBoundingClientRect();
         panel.style.position = 'fixed';
-        panel.style.bottom = (window.innerHeight - rect.top + 8) + 'px';
+        // Position above minimap, but if not enough space, position below
+        const panelHeight = 400; // approximate
+        const spaceAbove = rect.top;
+        if (spaceAbove > panelHeight + 10) {
+            panel.style.bottom = (window.innerHeight - rect.top + 8) + 'px';
+        } else {
+            panel.style.top = (rect.bottom + 8) + 'px';
+        }
         panel.style.right = (window.innerWidth - rect.right) + 'px';
 
         Object.assign(panel.style, {
@@ -681,24 +945,13 @@
             g.style.cssText = 'display:flex;gap:4px;';
         });
         panel.querySelectorAll('button').forEach(b => {
-            if (b.dataset.setting === 'showWelcome') {
-                b.style.cssText = `background:${c.headerBg};border:1px solid ${c.border};color:${c.textDim};border-radius:6px;padding:3px 10px;cursor:pointer;font-size:0.72rem;font-family:inherit;transition:all 0.15s;`;
-                b.addEventListener('mouseenter', () => { b.style.color = c.text; b.style.borderColor = c.accent; });
-                b.addEventListener('mouseleave', () => { if (!b.classList.contains('active')) { b.style.color = c.textDim; b.style.borderColor = c.border; }});
-                if (b.classList.contains('active')) {
-                    b.style.background = c.accent;
-                    b.style.color = settings.theme === 'light' ? '#fff' : '#000';
-                    b.style.borderColor = c.accent;
-                }
-            } else {
-                b.style.cssText = `background:${c.headerBg};border:1px solid ${c.border};color:${c.textDim};border-radius:6px;padding:3px 10px;cursor:pointer;font-size:0.72rem;font-family:inherit;transition:all 0.15s;`;
-                b.addEventListener('mouseenter', () => { b.style.color = c.text; b.style.borderColor = c.accent; });
-                b.addEventListener('mouseleave', () => { if (!b.classList.contains('active')) { b.style.color = c.textDim; b.style.borderColor = c.border; }});
-                if (b.classList.contains('active')) {
-                    b.style.background = c.accent;
-                    b.style.color = settings.theme === 'light' ? '#fff' : '#000';
-                    b.style.borderColor = c.accent;
-                }
+            b.style.cssText = `background:${c.headerBg};border:1px solid ${c.border};color:${c.textDim};border-radius:6px;padding:3px 8px;cursor:pointer;font-size:0.68rem;font-family:inherit;transition:all 0.15s;min-width:32px;text-align:center;`;
+            b.addEventListener('mouseenter', () => { b.style.color = c.text; b.style.borderColor = c.accent; });
+            b.addEventListener('mouseleave', () => { if (!b.classList.contains('active')) { b.style.color = c.textDim; b.style.borderColor = c.border; }});
+            if (b.classList.contains('active')) {
+                b.style.background = c.accent;
+                b.style.color = settings.theme === 'light' ? '#fff' : '#000';
+                b.style.borderColor = c.accent;
             }
         });
 
@@ -739,6 +992,70 @@
                 toggleSettingsPanel();
             });
         }
+        const countryBtn = panel.querySelector('[data-setting="showCountry"]');
+        if (countryBtn) {
+            countryBtn.addEventListener('click', () => {
+                settings.showCountry = !settings.showCountry;
+                saveSettings();
+                panel.remove();
+                toggleSettingsPanel();
+            });
+        }
+        const compactBtn = panel.querySelector('[data-setting="compactMode"]');
+        if (compactBtn) {
+            compactBtn.addEventListener('click', () => {
+                settings.compactMode = !settings.compactMode;
+                saveSettings();
+                applyCompactMode();
+                panel.remove();
+                toggleSettingsPanel();
+            });
+        }
+        const mapProviderSelect = panel.querySelector('[data-setting="mapProvider"]');
+        if (mapProviderSelect) {
+            mapProviderSelect.addEventListener('change', () => {
+                settings.mapProvider = mapProviderSelect.value;
+                saveSettings();
+                panel.remove();
+                toggleSettingsPanel();
+                // Reload map with new provider
+                if (mapObj && mapObj.map) {
+                    mapObj.map.eachLayer(layer => { if (layer !== mapObj.marker) mapObj.map.removeLayer(layer); });
+                    const provider = MAP_PROVIDERS[settings.mapProvider] || MAP_PROVIDERS.osm;
+                    L.tileLayer(provider.url, { maxZoom: provider.maxZoom, attribution: provider.attribution, subdomains: provider.subdomains }).addTo(mapObj.map);
+                }
+            });
+        }
+        const coordFormatSelect = panel.querySelector('[data-setting="coordFormat"]');
+        if (coordFormatSelect) {
+            coordFormatSelect.addEventListener('change', () => {
+                settings.coordFormat = coordFormatSelect.value;
+                saveSettings();
+                if (lastCoords) {
+                    const coordsText = document.getElementById('monowe-coords-text');
+                    if (coordsText) coordsText.textContent = formatCoord(lastCoords.lat, lastCoords.lng);
+                }
+            });
+        }
+        const historyBtn = panel.querySelector('#monowe-show-history');
+        if (historyBtn) {
+            historyBtn.addEventListener('click', () => {
+                panel.remove();
+                showHistoryPanel();
+            });
+        }
+        const resetBtn = panel.querySelector('#monowe-reset-settings');
+        if (resetBtn) {
+            resetBtn.addEventListener('click', () => {
+                if (confirm('Reset all settings to defaults?')) {
+                    settings = { ...defaults };
+                    saveSettings();
+                    panel.remove();
+                    toggleSettingsPanel();
+                    showToast('Settings reset!');
+                }
+            });
+        }
 
         setTimeout(() => {
             const handler = (e) => {
@@ -749,6 +1066,130 @@
             };
             document.addEventListener('mousedown', handler);
         }, 50);
+    }
+
+    function showHistoryPanel() {
+        const c = getThemeColors();
+        let panel = document.getElementById('monowe-history-panel');
+        if (panel) { panel.remove(); return; }
+
+        panel = document.createElement('div');
+        panel.id = 'monowe-history-panel';
+        panel.innerHTML = `
+            <div id="monowe-history-header" style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:${c.headerBg};border-bottom:1px solid ${c.border};cursor:move;user-select:none;">
+                <span style="font-size:0.75rem;color:${c.accent};font-weight:600;">Location History (${locationHistory.length})</span>
+                <div style="display:flex;gap:4px;">
+                    <button id="monowe-export-history" style="background:none;border:1px solid ${c.border};color:${c.accent};border-radius:4px;padding:2px 8px;cursor:pointer;font-size:0.65rem;">Export</button>
+                    <button id="monowe-clear-history" style="background:none;border:1px solid ${c.border};color:#ff6b6b;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:0.65rem;">Clear</button>
+                    <button id="monowe-close-history" style="background:none;border:none;color:${c.textDim};cursor:pointer;font-size:0.9rem;padding:0 4px;">&times;</button>
+                </div>
+            </div>
+            <div id="monowe-history-list" style="max-height:300px;overflow-y:auto;padding:4px 0;"></div>
+        `;
+        Object.assign(panel.style, {
+            position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
+            width: '380px', background: c.bg, border: `1px solid ${c.border}`,
+            borderRadius: '10px', zIndex: '9999999', boxShadow: c.shadow,
+            fontFamily: "'Segoe UI', system-ui, sans-serif", color: c.text,
+        });
+        document.body.appendChild(panel);
+
+        // Make history panel draggable
+        const header = panel.querySelector('#monowe-history-header');
+        let isDragging = false, offsetX, offsetY;
+        header.addEventListener('mousedown', (e) => {
+            if (e.target.tagName === 'BUTTON') return;
+            isDragging = true;
+            const rect = panel.getBoundingClientRect();
+            offsetX = e.clientX - rect.left;
+            offsetY = e.clientY - rect.top;
+            panel.style.transform = 'none';
+            panel.style.transition = 'none';
+        });
+        document.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            panel.style.left = (e.clientX - offsetX) + 'px';
+            panel.style.top = (e.clientY - offsetY) + 'px';
+        });
+        document.addEventListener('mouseup', () => {
+            if (isDragging) {
+                isDragging = false;
+                panel.style.transition = '';
+            }
+        });
+
+        const list = panel.querySelector('#monowe-history-list');
+        if (locationHistory.length === 0) {
+            list.innerHTML = `<div style="padding:20px;text-align:center;color:${c.textDim};font-size:0.75rem;">No history yet</div>`;
+        } else {
+            for (let i = locationHistory.length - 1; i >= 0; i--) {
+                const h = locationHistory[i];
+                const time = new Date(h.time).toLocaleString();
+                const item = document.createElement('div');
+                item.style.cssText = `padding:8px 12px;border-bottom:1px solid ${c.border};cursor:pointer;font-size:0.72rem;transition:background 0.15s;`;
+                item.innerHTML = `
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <span style="color:${c.text};">${(h.country ? getCountryFlag(COUNTRY_CODES[h.country] || '') + ' ' : '')}${h.name || 'Unknown'}</span>
+                        <span style="color:${c.textDim};font-size:0.62rem;">${time}</span>
+                    </div>
+                    <div style="color:${c.textDim};font-size:0.65rem;font-family:monospace;margin-top:2px;">${h.lat.toFixed(4)}, ${h.lng.toFixed(4)}</div>
+                `;
+                item.addEventListener('mouseenter', () => { item.style.background = c.headerBg; });
+                item.addEventListener('mouseleave', () => { item.style.background = ''; });
+                item.addEventListener('click', () => {
+                    if (mapObj && mapObj.map) {
+                        mapObj.map.setView([h.lat, h.lng], 12, { animate: true });
+                        mapObj.marker.setLatLng([h.lat, h.lng]);
+                    }
+                    panel.remove();
+                });
+                list.appendChild(item);
+            }
+        }
+
+        document.getElementById('monowe-close-history').addEventListener('click', () => panel.remove());
+        document.getElementById('monowe-clear-history').addEventListener('click', () => {
+            locationHistory = [];
+            saveHistory();
+            panel.remove();
+        });
+        document.getElementById('monowe-export-history').addEventListener('click', () => {
+            const csv = 'lat,lng,name,country,time\n' + locationHistory.map(h =>
+                `${h.lat},${h.lng},"${(h.name||'').replace(/"/g,'""')}","${h.country||''}",${new Date(h.time).toISOString()}`
+            ).join('\n');
+            const blob = new Blob([csv], { type: 'text/csv' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = 'openguessr_history.csv'; a.click();
+            URL.revokeObjectURL(url);
+            showToast('History exported!');
+        });
+    }
+
+    function applyCompactMode() {
+        const el = document.getElementById('monowe-minimap');
+        if (!el) return;
+        const mapBody = document.getElementById('monowe-map-body');
+        const coordsBar = document.getElementById('monowe-coords-bar');
+        const header = el.querySelector('.monowe-map-header');
+        if (settings.compactMode) {
+            if (mapBody) mapBody.style.display = 'none';
+            if (coordsBar) coordsBar.style.display = 'none';
+            if (header) header.style.display = 'none';
+            el.style.width = 'auto';
+            el.style.minWidth = '120px';
+            el.style.padding = '6px 10px';
+            el.style.cursor = 'pointer';
+        } else {
+            if (mapBody) mapBody.style.display = '';
+            if (coordsBar) coordsBar.style.display = '';
+            if (header) header.style.display = '';
+            el.style.width = '';
+            el.style.minWidth = '';
+            el.style.padding = '';
+            el.style.cursor = 'move';
+            applySize();
+        }
     }
 
     function createMiniMap() {
@@ -763,8 +1204,8 @@
                     <span id="monowe-location-name" class="monowe-loc-name" title="Click to copy">...</span>
                 </div>
                 <div class="monowe-header-right">
-                    <button id="monowe-settings-btn" title="Settings">\u2699</button>
-                    <button id="monowe-map-toggle" title="Toggle map">\u2212</button>
+                    <button id="monowe-settings-btn" title="Settings">&#9881;</button>
+                    <button id="monowe-map-toggle" title="Toggle map">&#8722;</button>
                 </div>
             </div>
             <div id="monowe-coords-bar" class="monowe-coords" title="Click to copy coordinates">
@@ -788,7 +1229,7 @@
             const collapsed = mapBody.classList.toggle('collapsed');
             const coordsEl = document.getElementById('monowe-coords-bar');
             if (coordsEl) coordsEl.style.display = collapsed ? 'none' : '';
-            toggleBtn.textContent = collapsed ? '+' : '\u2212';
+            toggleBtn.textContent = collapsed ? '+' : '&#8722;';
             if (!collapsed) applySize();
         });
 
@@ -837,36 +1278,71 @@
         return container;
     }
 
-    // ─── MAP INITIALIZATION ──────────────────────────────────────
-    function waitForLeaflet() {
-        return new Promise((resolve) => {
-            const check = setInterval(() => {
-                if (window.L) { clearInterval(check); resolve(); }
-            }, 200);
-        });
+    // ─── FALLBACK MAP ────────────────────────────────────────────
+    function createFallbackMap(coords) {
+        const c = getThemeColors();
+        const container = document.getElementById('monowe-minimap');
+        if (!container) return;
+
+        container.classList.add('error-state');
+        const mapBody = document.getElementById('monowe-map-body');
+        if (mapBody) {
+            mapBody.innerHTML = `
+                <div style="padding:12px;text-align:center;">
+                    <div style="color:${c.accent};font-size:0.8rem;margin-bottom:6px;">Map unavailable</div>
+                    <div style="color:${c.textDim};font-size:0.7rem;">Leaflet failed to load</div>
+                    ${coords ? `<div style="color:${c.text};font-size:0.7rem;margin-top:8px;font-family:monospace;">${coords.lat.toFixed(6)}, ${coords.lng.toFixed(6)}</div>` : ''}
+                </div>
+            `;
+        }
     }
 
+    // ─── MAP INITIALIZATION ──────────────────────────────────────
     async function initLeafletMap() {
-        await waitForLeaflet();
-        const map = L.map('monowe-map-body', {
-            zoomControl: true,
-            attributionControl: false,
-        }).setView([20, 0], 5);
+        try {
+            await loadLeaflet();
+        } catch (e) {
+            log('Leaflet load failed:', e);
+            createFallbackMap(lastCoords);
+            return null;
+        }
 
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            maxZoom: 19,
-            attribution: '&copy; OpenStreetMap',
-        }).addTo(map);
+        try {
+            const map = L.map('monowe-map-body', {
+                zoomControl: true,
+                attributionControl: false,
+            }).setView([20, 0], 5);
 
-        const marker = L.circleMarker([0, 0], {
-            radius: 8,
-            color: '#00d4ff',
-            fillColor: '#00d4ff',
-            fillOpacity: 0.8,
-            weight: 2,
-        }).addTo(map);
+            // Try selected provider, fallback to OSM
+            let provider = MAP_PROVIDERS[settings.mapProvider] || MAP_PROVIDERS.osm;
+            try {
+                L.tileLayer(provider.url, {
+                    maxZoom: provider.maxZoom,
+                    attribution: provider.attribution,
+                    subdomains: provider.subdomains || '',
+                }).addTo(map);
+            } catch (tileErr) {
+                log('Tile layer failed, falling back to OSM:', tileErr);
+                L.tileLayer(MAP_PROVIDERS.osm.url, {
+                    maxZoom: MAP_PROVIDERS.osm.maxZoom,
+                    attribution: MAP_PROVIDERS.osm.attribution,
+                }).addTo(map);
+            }
 
-        return { map, marker };
+            const marker = L.circleMarker([0, 0], {
+                radius: 8,
+                color: '#00d4ff',
+                fillColor: '#00d4ff',
+                fillOpacity: 0.8,
+                weight: 2,
+            }).addTo(map);
+
+            return { map, marker };
+        } catch (e) {
+            log('Map init failed:', e.message || e);
+            createFallbackMap(lastCoords);
+            return null;
+        }
     }
 
     function updateMap(mapObj, coords) {
@@ -876,14 +1352,13 @@
         mapObj.map.setView(latlng, 12, { animate: true, duration: 0.8 });
 
         const coordsText = document.getElementById('monowe-coords-text');
-        if (coordsText) coordsText.textContent = coords.lat.toFixed(6) + ', ' + coords.lng.toFixed(6);
+        if (coordsText) coordsText.textContent = formatCoord(coords.lat, coords.lng);
     }
 
     // ─── REVERSE GEOCODING ───────────────────────────────────────
-    let geocodeTimer = null;
     let lastGeocoded = null;
 
-    async function reverseGeocode(lat, lng) {
+    const reverseGeocode = throttle(async (lat, lng) => {
         const key = lat.toFixed(3) + ',' + lng.toFixed(3);
         if (key === lastGeocoded) return;
         lastGeocoded = key;
@@ -891,7 +1366,7 @@
         try {
             const resp = await fetch(
                 'https://nominatim.openstreetmap.org/reverse?format=json&lat=' + lat + '&lon=' + lng + '&zoom=10&accept-language=en',
-                { headers: { 'User-Agent': 'monowe-openguessr/2.0' } }
+                { headers: { 'User-Agent': 'monowe-openguessr/3.0' } }
             );
             const data = await resp.json();
             const el = document.getElementById('monowe-location-name');
@@ -901,17 +1376,27 @@
             const city = addr.city || addr.town || addr.village || addr.hamlet || addr.municipality || '';
             const country = addr.country || '';
             const region = addr.state || addr.region || '';
+            const countryCode = addr.country_code || '';
 
             let label = city || region || country || (data.display_name || '').split(',').slice(0, 2).join(', ') || '...';
             if (city && country && city !== country) label = city + ', ' + country;
             else if (region && country && region !== country) label = region + ', ' + country;
 
+            // Add country flag
+            if (settings.showCountry && countryCode) {
+                const flag = getCountryFlag(countryCode);
+                if (flag) label = flag + ' ' + label;
+            }
+
             el.textContent = label;
             el.title = (data.display_name || '') + '\nClick to copy coordinates';
+
+            // Save to history
+            addToHistory(lat, lng, data.display_name || label, country);
         } catch (e) {
-            console.log('[monowe] geocode error:', e);
+            log('geocode error:', e);
         }
-    }
+    }, 1000);
 
     // ─── HOTKEY ──────────────────────────────────────────────────
     function setupHotkey() {
@@ -925,39 +1410,532 @@
         });
     }
 
+    // ─── LEAFLET MAP INTERCEPT ────────────────────────────────────
+    let gameMapInstance = null;
+
+    function findButton(texts) {
+        const buttons = document.querySelectorAll('button, .standard-button, [role="button"], div.confirm-button');
+        for (const btn of buttons) {
+            const btnText = (btn.textContent || '').toLowerCase().trim();
+            for (const t of texts) {
+                if (btnText.includes(t.toLowerCase())) return btn;
+            }
+        }
+        return null;
+    }
+
+    // ─── INTERCEPT LEAFLET CLICK HANDLER ─────────────────────────
+    // Hook L.map to capture game map instance
+    function hookGameMap() {
+        // Wait for Leaflet to load, then hook
+        const check = setInterval(() => {
+            if (!window.L || !window.L.map) return;
+            clearInterval(check);
+
+            log('hookGameMap: Leaflet loaded, hooking L.map...');
+
+            const origMap = window.L.map;
+            window.L.map = function (...args) {
+                const map = origMap.apply(this, args);
+                const container = map.getContainer();
+                log('hookGameMap: L.map called, container:', container ? container.id : 'null');
+                if (container && container.id === 'map') {
+                    gameMapInstance = map;
+                    log('hookGameMap: GAME MAP CAPTURED!');
+                }
+                return map;
+            };
+            window.L.map.prototype = origMap.prototype;
+
+            // Also scan for already-created maps
+            scanExistingMaps();
+        }, 300);
+    }
+
+    function scanExistingMaps() {
+        if (!window.L) return;
+
+        // Method: scan all elements for Leaflet map instances
+        const containers = document.querySelectorAll('.leaflet-container, #map');
+        for (const container of containers) {
+            if (container._leaflet_id !== undefined) {
+                // Check all properties
+                for (const key of Object.getOwnPropertyNames(container)) {
+                    try {
+                        const val = container[key];
+                        if (val && typeof val === 'object' && typeof val.getCenter === 'function' && typeof val.getZoom === 'function') {
+                            gameMapInstance = val;
+                            log('scanExistingMaps: FOUND map on', container.id || container.className, 'prop:', key);
+                            return;
+                        }
+                    } catch {}
+                }
+
+                // Check _leaflet_map on all children
+                const children = container.querySelectorAll('*');
+                for (const child of children) {
+                    for (const key of Object.getOwnPropertyNames(child)) {
+                        try {
+                            if (key === '_leaflet_map') {
+                                gameMapInstance = child[key];
+                                log('scanExistingMaps: FOUND via _leaflet_map on child');
+                                return;
+                            }
+                        } catch {}
+                    }
+                }
+            }
+        }
+
+        // Method: check L namespace for any map-like objects
+        for (const key of Object.keys(window.L)) {
+            try {
+                const val = window.L[key];
+                if (val && typeof val === 'object' && typeof val.getCenter === 'function' && typeof val.getContainer === 'function') {
+                    const c = val.getContainer();
+                    if (c && (c.id === 'map' || c.classList.contains('leaflet-container'))) {
+                        gameMapInstance = val;
+                        log('scanExistingMaps: FOUND map via L.' + key);
+                        return;
+                    }
+                }
+            } catch {}
+        }
+
+        log('scanExistingMaps: no existing map found');
+    }
+
+    function scanForMapInstance(container) {
+        if (!container) return null;
+
+        // Method 1: Direct property scan
+        for (const key of Object.getOwnPropertyNames(container)) {
+            const val = container[key];
+            if (val && typeof val === 'object' && typeof val.getCenter === 'function' && typeof val.getZoom === 'function') {
+                gameMapInstance = val;
+                log('found map via property:', key);
+                return val;
+            }
+        }
+
+        // Method 2: Check _leaflet properties
+        for (const key of Object.keys(container)) {
+            if (key.startsWith('_leaflet')) {
+                const val = container[key];
+                if (val && typeof val === 'object' && val._zoom !== undefined) {
+                    gameMapInstance = val;
+                    log('found map via _leaflet:', key);
+                    return val;
+                }
+            }
+        }
+
+        // Method 3: Scan leaflet panes and controls
+        const elements = container.querySelectorAll('.leaflet-pane, .leaflet-control, .leaflet-tile-pane, .leaflet-overlay-pane, .leaflet-marker-pane');
+        for (const el of elements) {
+            for (const key of Object.getOwnPropertyNames(el)) {
+                try {
+                    const val = el[key];
+                    if (val && typeof val === 'object' && typeof val.getCenter === 'function' && typeof val.getZoom === 'function') {
+                        gameMapInstance = val;
+                        log('found map via element:', el.className, key);
+                        return val;
+                    }
+                    // Also check for _map property (Leaflet stores map ref on layers)
+                    if (val && typeof val === 'object' && val._map && typeof val._map.getCenter === 'function') {
+                        gameMapInstance = val._map;
+                        log('found map via _map on:', el.className, key);
+                        return val._map;
+                    }
+                } catch {}
+            }
+        }
+
+        // Method 4: Access through L's internal stores
+        if (window.L && container._leaflet_id !== undefined) {
+            if (window.L.Map && window.L.Map._maps) {
+                const map = window.L.Map._maps[container._leaflet_id];
+                if (map) {
+                    gameMapInstance = map;
+                    log('found map via L.Map._maps');
+                    return map;
+                }
+            }
+
+            // Check L._maps directly
+            if (window.L._maps) {
+                for (const key in window.L._maps) {
+                    const m = window.L._maps[key];
+                    if (m && m.getContainer && m.getContainer() === container) {
+                        gameMapInstance = m;
+                        log('found map via L._maps');
+                        return m;
+                    }
+                }
+            }
+
+            // Scan ALL elements inside map for _leaflet_map references
+            const allEls = container.querySelectorAll('*');
+            for (const el of allEls) {
+                for (const key of Object.getOwnPropertyNames(el)) {
+                    try {
+                        if (key === '_leaflet_map' || (key.startsWith('_leaflet') && el[key] && typeof el[key].getCenter === 'function')) {
+                            gameMapInstance = el[key];
+                            log('found map via deep scan:', el.tagName, key);
+                            return el[key];
+                        }
+                    } catch {}
+                }
+            }
+        }
+
+        // Method 5: Hook via event listeners
+        if (window.L && window.L.DomEvent && window.L.DomEvent._map) {
+            gameMapInstance = window.L.DomEvent._map;
+            log('found map via L.DomEvent._map');
+            return window.L.DomEvent._map;
+        }
+
+        return null;
+    }
+
+    function findGameMap() {
+        log('findGameMap: searching...');
+        if (gameMapInstance) {
+            try {
+                const center = gameMapInstance.getCenter();
+                log('findGameMap: cached map valid, center:', center.lat.toFixed(4), center.lng.toFixed(4));
+                return gameMapInstance;
+            } catch (e) {
+                log('findGameMap: cached map invalid');
+                gameMapInstance = null;
+            }
+        }
+
+        // Try scanning for maps
+        scanExistingMaps();
+        if (gameMapInstance) {
+            log('findGameMap: found via scanExistingMaps');
+            return gameMapInstance;
+        }
+
+        const mapEl = document.getElementById('map');
+        if (!mapEl) {
+            log('findGameMap: #map NOT FOUND');
+            return null;
+        }
+        log('findGameMap: #map found, _leaflet_id:', mapEl._leaflet_id);
+
+        // Try property scan
+        const found = scanForMapInstance(mapEl);
+        if (found) return found;
+
+        // Method: iterate window properties
+        log('searching window properties...');
+        const windowKeys = Object.getOwnPropertyNames(window);
+        log('window properties count:', windowKeys.length);
+
+        for (const key of windowKeys) {
+            try {
+                const val = window[key];
+                if (val && typeof val === 'object' && typeof val.getCenter === 'function' && typeof val.getZoom === 'function') {
+                    const container = val.getContainer ? val.getContainer() : null;
+                    if (container && container.id === 'map') {
+                        gameMapInstance = val;
+                        log('findGameMap: FOUND via window.' + key);
+                        return val;
+                    }
+                }
+            } catch {}
+        }
+
+        // Method: scan document.querySelectorAll('*') for map-like objects
+        log('scanning DOM elements...');
+        const allElements = document.querySelectorAll('#map *, #map');
+        for (const el of allElements) {
+            for (const key of Object.getOwnPropertyNames(el)) {
+                try {
+                    const val = el[key];
+                    if (val && typeof val === 'object' && typeof val.getCenter === 'function') {
+                        gameMapInstance = val;
+                        log('findGameMap: FOUND via DOM scan on', el.tagName, el.id, key);
+                        return val;
+                    }
+                } catch {}
+            }
+        }
+
+        log('findGameMap: NOT FOUND after all methods');
+        return null;
+    }
+
+    function openGameMap() {
+        log('openGameMap: looking for confirm-button...');
+        const confirmBtn = document.getElementById('confirm-button');
+        if (!confirmBtn) {
+            log('openGameMap: confirm-button NOT FOUND');
+            return false;
+        }
+        log('openGameMap: confirm-button found, text:', confirmBtn.textContent.trim());
+
+        const mapHolder = document.getElementById('map-holder');
+        const isMapVisible = mapHolder && mapHolder.offsetHeight > 0;
+        log('openGameMap: map visible:', isMapVisible, 'height:', mapHolder ? mapHolder.offsetHeight : 'N/A');
+
+        if (!isMapVisible) {
+            log('openGameMap: clicking to open map');
+            confirmBtn.click();
+        } else {
+            log('openGameMap: map already open');
+        }
+        return true;
+    }
+
+    function dispatchMapEvent(container, clientX, clientY, type) {
+        const events = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+        const useEvents = type === 'all' ? events : [type];
+
+        for (const eventType of useEvents) {
+            const EventClass = eventType.startsWith('pointer') ? PointerEvent : MouseEvent;
+            const event = new EventClass(eventType, {
+                clientX, clientY,
+                bubbles: true,
+                cancelable: true,
+                view: window,
+                button: 0,
+                buttons: eventType.includes('down') ? 1 : 0,
+                pointerId: 1,
+                pointerType: 'mouse',
+            });
+            container.dispatchEvent(event);
+        }
+    }
+
+    function clickGuessButton() {
+        // Look for the confirm button that becomes "Guess" after marker is placed
+        const confirmBtn = document.getElementById('confirm-button');
+        if (confirmBtn) {
+            const text = (confirmBtn.textContent || '').toLowerCase();
+            if (text.includes('guess') || text.includes('submit') || text.includes('confirm')) {
+                log('clicking guess button:', text.trim());
+                confirmBtn.click();
+                return true;
+            }
+        }
+
+        // Search by text
+        const guessBtn = findButton(['guess', 'submit', 'confirm']);
+        if (guessBtn) {
+            log('clicking guess button by text');
+            guessBtn.click();
+            return true;
+        }
+
+        return false;
+    }
+
+    function clickNextButton() {
+        const nextBtn = findButton(['next', 'continue', 'new game', 'play again', 'new round', 'next round']);
+        if (nextBtn) {
+            log('clicking next button');
+            nextBtn.click();
+            return true;
+        }
+        return false;
+    }
+
+    // ─── DEBUG CONSOLE ───────────────────────────────────────────
+    let debugConsoleVisible = false;
+
+    function createDebugConsole() {
+        const c = getThemeColors();
+        const container = document.createElement('div');
+        container.id = 'monowe-debug-console';
+        container.innerHTML = `
+            <div id="monowe-debug-header" style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px;background:${c.headerBg};border-bottom:1px solid ${c.border};cursor:move;user-select:none;">
+                <span style="font-size:0.7rem;color:${c.accent};font-weight:600;">Debug Console (drag to move)</span>
+                <div style="display:flex;gap:4px;">
+                    <button id="monowe-debug-clear" style="background:none;border:1px solid ${c.border};color:${c.textDim};border-radius:4px;padding:2px 6px;cursor:pointer;font-size:0.6rem;">Clear</button>
+                    <button id="monowe-debug-close" style="background:none;border:none;color:${c.textDim};cursor:pointer;font-size:0.9rem;padding:0 4px;">&times;</button>
+                </div>
+            </div>
+            <div id="monowe-debug-output" style="height:200px;overflow-y:auto;padding:6px 10px;font-family:'SF Mono','Cascadia Code',Consolas,monospace;font-size:0.65rem;color:${c.text};line-height:1.5;"></div>
+            <div id="monowe-debug-resize" style="position:absolute;bottom:0;right:0;width:16px;height:16px;cursor:nwse-resize;background:linear-gradient(135deg,transparent 50%,${c.textDim} 50%);border-radius:0 0 10px 0;opacity:0.5;"></div>
+        `;
+        Object.assign(container.style, {
+            position: 'fixed',
+            bottom: '20px',
+            left: '20px',
+            width: '420px',
+            height: '260px',
+            background: c.bg,
+            border: `1px solid ${c.border}`,
+            borderRadius: '10px',
+            zIndex: '999999',
+            boxShadow: c.shadow,
+            display: 'none',
+            overflow: 'hidden',
+        });
+        document.body.appendChild(container);
+
+        // Drag functionality
+        const header = document.getElementById('monowe-debug-header');
+        let isDragging = false, dragOffsetX, dragOffsetY;
+
+        header.addEventListener('mousedown', (e) => {
+            if (e.target.tagName === 'BUTTON') return;
+            isDragging = true;
+            dragOffsetX = e.clientX - container.getBoundingClientRect().left;
+            dragOffsetY = e.clientY - container.getBoundingClientRect().top;
+            container.style.transition = 'none';
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            container.style.left = (e.clientX - dragOffsetX) + 'px';
+            container.style.top = (e.clientY - dragOffsetY) + 'px';
+            container.style.right = 'auto';
+            container.style.bottom = 'auto';
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (isDragging) {
+                isDragging = false;
+                container.style.transition = '';
+            }
+        });
+
+        // Resize functionality
+        const resizeHandle = document.getElementById('monowe-debug-resize');
+        let isResizing = false, startW, startH, startX, startY;
+
+        resizeHandle.addEventListener('mousedown', (e) => {
+            isResizing = true;
+            startW = container.offsetWidth;
+            startH = container.offsetHeight;
+            startX = e.clientX;
+            startY = e.clientY;
+            e.preventDefault();
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (!isResizing) return;
+            const newW = Math.max(250, startW + (e.clientX - startX));
+            const newH = Math.max(100, startH + (startY - e.clientY));
+            container.style.width = newW + 'px';
+            container.style.height = newH + 'px';
+            const output = document.getElementById('monowe-debug-output');
+            if (output) output.style.height = (newH - 40) + 'px';
+        });
+
+        document.addEventListener('mouseup', () => {
+            isResizing = false;
+        });
+
+        // Close button
+        document.getElementById('monowe-debug-close').addEventListener('click', () => {
+            debugConsoleVisible = false;
+            container.style.display = 'none';
+        });
+
+        // Clear button
+        document.getElementById('monowe-debug-clear').addEventListener('click', () => {
+            debugLogs.length = 0;
+            const output = document.getElementById('monowe-debug-output');
+            if (output) output.innerHTML = '<div style="color:' + c.textDim + '">Cleared</div>';
+        });
+
+        return container;
+    }
+
+    function toggleDebugConsole() {
+        let console = document.getElementById('monowe-debug-console');
+        if (!console) console = createDebugConsole();
+        debugConsoleVisible = !debugConsoleVisible;
+        console.style.display = debugConsoleVisible ? 'block' : 'none';
+        if (debugConsoleVisible) updateDebugConsole();
+    }
+
+    function updateDebugConsole() {
+        if (!debugConsoleVisible) return;
+        const output = document.getElementById('monowe-debug-output');
+        if (!output) return;
+        const c = getThemeColors();
+
+        output.innerHTML = debugLogs.map((entry, i) => {
+            const isError = entry.msg.toLowerCase().includes('error') || entry.msg.toLowerCase().includes('fail');
+            const color = isError ? '#ff6b6b' : c.textDim;
+            return `<div style="color:${color};border-bottom:1px solid ${c.border};padding:2px 0;"><span style="color:${c.accent};">${entry.time}</span> ${entry.msg}</div>`;
+        }).join('');
+
+        output.scrollTop = output.scrollHeight;
+    }
+
+    // Add debug button to minimap header
+    function addDebugButton() {
+        const headerRight = document.querySelector('.monowe-header-right');
+        if (!headerRight || document.getElementById('monowe-debug-btn')) return;
+
+        const btn = document.createElement('button');
+        btn.id = 'monowe-debug-btn';
+        btn.title = 'Debug Console';
+        btn.textContent = '\u{1F41B}';
+        btn.style.cssText = 'font-size:0.85rem;';
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            toggleDebugConsole();
+        });
+        headerRight.insertBefore(btn, headerRight.firstChild);
+    }
+
     // ─── MAIN ────────────────────────────────────────────────────
     let mapObj = null;
 
     async function main() {
-        console.log('[monowe] script starting... v2.0');
+        log('script starting... v2.0');
 
         listeners.push((coords) => {
             if (mapObj) updateMap(mapObj, coords);
-            clearTimeout(geocodeTimer);
-            geocodeTimer = setTimeout(() => reverseGeocode(coords.lat, coords.lng), 300);
+            reverseGeocode(coords.lat, coords.lng);
         });
 
         hookNetwork();
         hookJSONP();
         hookIframes();
         hookGoogleMapsAPI();
+        hookGameMap();
         setupHotkey();
+
+        // Monitor ALL network requests via PerformanceObserver
+        try {
+            const observer = new PerformanceObserver((list) => {
+                for (const entry of list.getEntries()) {
+                    log('NET:', entry.initiatorType, entry.name.substring(0, 150));
+                }
+            });
+            observer.observe({ entryTypes: ['resource'] });
+        } catch {}
 
         await showWelcomeAnimation();
 
         createMiniMap();
+        addDebugButton();
         mapObj = await initLeafletMap();
-        console.log('[monowe] minimap ready');
+        log('minimap ready');
+        if (settings.compactMode) applyCompactMode();
 
         if (lastCoords) {
-            console.log('[monowe] applying early coords:', lastCoords.lat, lastCoords.lng);
-            updateMap(mapObj, lastCoords);
+            log('applying early coords:', lastCoords.lat, lastCoords.lng);
+            if (mapObj) updateMap(mapObj, lastCoords);
             reverseGeocode(lastCoords.lat, lastCoords.lng);
         }
 
         scanPageHTML();
         setTimeout(scanPageHTML, 3000);
         setTimeout(scanPageHTML, 6000);
+
+        // Reposition settings panel on window resize
+        window.addEventListener('resize', repositionSettingsPanel);
     }
 
     if (document.readyState === 'complete' || document.readyState === 'interactive') {
