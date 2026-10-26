@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         OpenGuessr cheat v2.0
+// @name         OpenGuessr cheat
 // @namespace    monowe
-// @version      16.0
+// @version      16.1
 // @description  Improved location hack/cheat with better error handling and performance
 // @match        https://www.openguessr.com/*
 // @match        https://openguessr.com/*
@@ -15,8 +15,9 @@
 (function () {
     'use strict';
 
-    // ─── CONFIG ──────────────────────────────────────────────────
-    const DEBUG = true;
+    if (window.__monoweActive) return;
+    window.__monoweActive = true;
+
     const debugLogs = [];
     const MAX_LOGS = 500;
 
@@ -43,7 +44,7 @@
     const defaults = {
         size: 'medium', theme: 'dark', opacity: 95, showWelcome: true, hotkey: 'KeyM',
         mapProvider: 'osm', coordFormat: 'decimal',
-        compactMode: false, autoHide: false, autoHideDelay: 10,
+        compactMode: false,
         showCountry: true, showWikipedia: true,
     };
     let settings = { ...defaults };
@@ -53,7 +54,6 @@
     function saveSettings() { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); }
     function getMapSize() { return MAP_SIZES[settings.size] || MAP_SIZES.medium; }
 
-    // ─── LOCATION HISTORY ────────────────────────────────────────
     let locationHistory = [];
     try { locationHistory = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]'); } catch {}
     const MAX_HISTORY = 50;
@@ -65,7 +65,6 @@
         saveHistory();
     }
 
-    // ─── UTILITIES ───────────────────────────────────────────────
     function throttle(fn, ms) {
         let last = 0;
         return function (...args) {
@@ -81,7 +80,40 @@
         return isFinite(lat) && isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180 && !(lat === 0 && lng === 0);
     }
 
-    // ─── COORDINATE FORMATS ──────────────────────────────────────
+    const BINARY_URL_RE = /\.(png|jpe?g|gif|webp|avif|svg|ico|woff2?|ttf|otf|mp4|webm|mvt|pbf)([?#]|$)/i;
+
+    function makeDraggable(handle, target, exceptSelector) {
+        let isDragging = false, offsetX = 0, offsetY = 0;
+        const onDown = (e) => {
+            if (e.target.tagName === 'BUTTON' || e.target.closest('button')) return;
+            if (exceptSelector && e.target.closest(exceptSelector)) return;
+            isDragging = true;
+            offsetX = e.clientX - target.getBoundingClientRect().left;
+            offsetY = e.clientY - target.getBoundingClientRect().top;
+            target.style.transition = 'none';
+        };
+        const onMove = (e) => {
+            if (!isDragging) return;
+            target.style.left = (e.clientX - offsetX) + 'px';
+            target.style.top = (e.clientY - offsetY) + 'px';
+            target.style.right = 'auto';
+            target.style.bottom = 'auto';
+        };
+        const onUp = () => {
+            if (!isDragging) return;
+            isDragging = false;
+            target.style.transition = '';
+        };
+        handle.addEventListener('mousedown', onDown);
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+        return () => {
+            handle.removeEventListener('mousedown', onDown);
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+        };
+    }
+
     function toDMS(lat, lng) {
         const dms = (val, pos, neg) => {
             const abs = Math.abs(val);
@@ -126,7 +158,6 @@
         return `https://en.wikipedia.org/wiki/Special:Search?search=${q}`;
     }
 
-    // ─── MAP PROVIDERS ───────────────────────────────────────────
     const MAP_PROVIDERS = {
         osm: { name: 'OpenStreetMap', url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', maxZoom: 19, attribution: '© OpenStreetMap' },
         osmDark: { name: 'OSM Dark', url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', maxZoom: 19, attribution: '© CartoDB', subdomains: 'abcd' },
@@ -135,7 +166,6 @@
         terrain: { name: 'Terrain', url: 'https://tile.opentopomap.org/{z}/{x}/{y}.png', maxZoom: 17, attribution: '© OpenTopoMap' },
     };
 
-    // ─── COUNTRY FLAGS ───────────────────────────────────────────
     const COUNTRY_CODES = {
         'Afghanistan':'AF','Albania':'AL','Algeria':'DZ','Argentina':'AR','Armenia':'AM',
         'Australia':'AU','Austria':'AT','Azerbaijan':'AZ','Bangladesh':'BD','Belarus':'BY',
@@ -158,7 +188,6 @@
         'United States':'US','Uruguay':'UY','Uzbekistan':'UZ','Venezuela':'VE','Vietnam':'VN',
     };
 
-    // ─── CLEANUP SYSTEM ──────────────────────────────────────────
     const cleanupFns = [];
     const intervals = [];
 
@@ -178,44 +207,59 @@
 
     window.addEventListener('beforeunload', cleanupAll);
 
-    // ─── LOAD LEAFLET ────────────────────────────────────────────
+    let leafletLoadPromise = null;
     function loadLeaflet() {
-        return new Promise((resolve, reject) => {
+        if (leafletLoadPromise) return leafletLoadPromise;
+        leafletLoadPromise = new Promise((resolve, reject) => {
             if (window.L) { resolve(); return; }
 
+            const head = document.head || document.documentElement;
             const leafletCSS = document.createElement('link');
             leafletCSS.rel = 'stylesheet';
             leafletCSS.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
-            (document.head || document.documentElement).appendChild(leafletCSS);
+            head.appendChild(leafletCSS);
 
             const leafletJS = document.createElement('script');
+            let settled = false;
+            const timer = setTimeout(() => fail('Leaflet load timeout'), 10000);
+            const finish = () => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                resolve();
+            };
+            const fail = (msg) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                leafletJS.remove();
+                leafletCSS.remove();
+                leafletLoadPromise = null;
+                reject(new Error(msg));
+            };
+            leafletJS.onload = finish;
+            leafletJS.onerror = () => fail('Failed to load Leaflet');
             leafletJS.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
-            leafletJS.onload = resolve;
-            leafletJS.onerror = () => reject(new Error('Failed to load Leaflet'));
-            (document.head || document.documentElement).appendChild(leafletJS);
-
-            // Timeout fallback
-            setTimeout(() => {
-                if (!window.L) reject(new Error('Leaflet load timeout'));
-            }, 10000);
+            head.appendChild(leafletJS);
         });
+        return leafletLoadPromise;
     }
 
-    // ─── COORDINATE SYSTEM ───────────────────────────────────────
     const listeners = [];
     let lastCoords = null;
+    let lastCoordsFoundAt = 0;
 
     function emitCoords(coords) {
         if (!coords || !isValidCoord(coords.lat, coords.lng)) return;
         if (lastCoords && lastCoords.lat === coords.lat && lastCoords.lng === coords.lng) return;
         lastCoords = coords;
+        lastCoordsFoundAt = Date.now();
         log('coords found:', coords.lat, coords.lng);
         for (const fn of listeners) {
             try { fn(coords); } catch (e) { log('listener error:', e); }
         }
     }
 
-    // ─── METHOD 1: Hook Google Maps API ──────────────────────────
     function hookGoogleMapsAPI() {
         const check = trackInterval(() => {
             if (!window.google || !window.google.maps) return;
@@ -266,7 +310,7 @@
                         if (pos) {
                             const lat = typeof pos.lat === 'function' ? pos.lat() : pos.lat;
                             const lng = typeof pos.lng === 'function' ? pos.lng() : pos.lng;
-                            if (lat && lng) emitCoords({ lat, lng });
+                            if (isValidCoord(lat, lng)) emitCoords({ lat, lng });
                         }
                     }
                 } catch (e) { log('readPosition error:', e); }
@@ -305,7 +349,6 @@
         }, 500);
     }
 
-    // ─── METHOD 2: Intercept fetch/XHR ───────────────────────────
     function hookNetwork() {
         const coordPatterns = [
             /"(?:lat(?:itude)?|y)"\s*:\s*(-?\d+\.?\d*)\s*,\s*"(?:l(?:on|ng)(?:g(?:itude)?|)|x)"\s*:\s*(-?\d+\.?\d*)/i,
@@ -332,29 +375,30 @@
             const method = opts?.method || (url instanceof Request ? url.method : 'GET');
             const bodyRaw = opts?.body || (url instanceof Request ? url.body : null);
 
-            log('fetch:', method, urlStr.substring(0, 120));
-
-            // Show ALL bodies for debugging
-            if (bodyRaw) {
-                let bodyStr = '';
-                if (typeof bodyRaw === 'string') bodyStr = bodyRaw;
-                else if (bodyRaw instanceof URLSearchParams) bodyStr = bodyRaw.toString();
-                else if (bodyRaw instanceof ArrayBuffer) bodyStr = '(arraybuffer ' + bodyRaw.byteLength + ')';
-                else bodyStr = '(' + typeof bodyRaw + ')';
-
-                if (bodyStr.length > 0 && !bodyStr.startsWith('(')) {
-                    log('fetch body:', bodyStr.substring(0, 300));
+            const interesting = !BINARY_URL_RE.test(urlStr);
+            if (interesting) {
+                log('fetch:', method, urlStr.substring(0, 120));
+                if (bodyRaw) {
+                    let bodyStr = '';
+                    if (typeof bodyRaw === 'string') bodyStr = bodyRaw;
+                    else if (bodyRaw instanceof URLSearchParams) bodyStr = bodyRaw.toString();
+                    if (bodyStr.length > 0) {
+                        log('fetch body:', bodyStr.substring(0, 300));
+                    }
                 }
             }
 
             const resp = await origFetch.apply(this, args);
-            try {
-                const clone = resp.clone();
-                clone.text().then((t) => {
-                    const c = extractCoords(t);
-                    if (c) emitCoords(c);
-                }).catch(() => {});
-            } catch {}
+            const contentType = resp.headers.get('content-type') || '';
+            if (interesting && /json|text|javascript/i.test(contentType)) {
+                try {
+                    const clone = resp.clone();
+                    clone.text().then((t) => {
+                        const c = extractCoords(t);
+                        if (c) emitCoords(c);
+                    }).catch(() => {});
+                } catch {}
+            }
             return resp;
         };
 
@@ -382,7 +426,6 @@
         });
     }
 
-    // ─── METHOD 3: Hook JSONP callbacks ──────────────────────────
     function hookJSONP() {
         const origAppendChild = Node.prototype.appendChild;
         Node.prototype.appendChild = function (node) {
@@ -404,6 +447,7 @@
     }
 
     function scanGlobalScope() {
+        if (lastCoords && Date.now() - lastCoordsFoundAt < 20000) return;
         try {
             for (const key in window) {
                 try {
@@ -415,7 +459,7 @@
                         if (pos) {
                             const lat = typeof pos.lat === 'function' ? pos.lat() : pos.lat;
                             const lng = typeof pos.lng === 'function' ? pos.lng() : pos.lng;
-                            if (lat && lng) emitCoords({ lat, lng });
+                            if (isValidCoord(lat, lng)) emitCoords({ lat, lng });
                         }
                     }
                     if (obj.pano && typeof obj.pano.getPosition === 'function') {
@@ -423,13 +467,13 @@
                         if (pos) {
                             const lat = typeof pos.lat === 'function' ? pos.lat() : pos.lat;
                             const lng = typeof pos.lng === 'function' ? pos.lng() : pos.lng;
-                            if (lat && lng) emitCoords({ lat, lng });
+                            if (isValidCoord(lat, lng)) emitCoords({ lat, lng });
                         }
                     }
                     if (obj.position && typeof obj.position === 'object') {
                         const lat = obj.position.lat;
                         const lng = obj.position.lng;
-                        if (lat && lng && isFinite(lat) && isFinite(lng)) {
+                        if (isValidCoord(lat, lng)) {
                             emitCoords({ lat: typeof lat === 'function' ? lat() : lat, lng: typeof lng === 'function' ? lng() : lng });
                         }
                     }
@@ -438,7 +482,6 @@
         } catch {}
     }
 
-    // ─── METHOD 4: MutationObserver on iframes ──────────────────
     function hookIframes() {
         function extractFromUrl(url) {
             if (!url) return;
@@ -483,7 +526,6 @@
         cleanupFns.push(() => observer.disconnect());
     }
 
-    // ─── METHOD 5: Scan page HTML ────────────────────────────────
     function scanPageHTML() {
         const html = document.documentElement.innerHTML;
         const patterns = [
@@ -505,7 +547,6 @@
         }
     }
 
-    // ─── ANIMATION OVERLAY ───────────────────────────────────────
     function showWelcomeAnimation() {
         return new Promise((resolve) => {
             if (!settings.showWelcome) { resolve(); return; }
@@ -606,7 +647,6 @@
         });
     }
 
-    // ─── THEME ───────────────────────────────────────────────────
     function getThemeColors() {
         return settings.theme === 'light' ? {
             bg: 'rgba(245,245,250,0.97)',
@@ -631,7 +671,6 @@
         };
     }
 
-    // ─── MINI-MAP ────────────────────────────────────────────────
     let mapStyleEl = null;
 
     function injectMapStyles() {
@@ -776,7 +815,6 @@
         const body = document.getElementById('monowe-map-body');
         if (body && !body.classList.contains('collapsed')) body.style.height = sz.h + 'px';
         if (mapObj && mapObj.map) setTimeout(() => mapObj.map.invalidateSize(), 350);
-        // Update settings panel position
         repositionSettingsPanel();
     }
 
@@ -818,6 +856,7 @@
         });
     }
 
+    let toastStyleEl = null;
     function showToast(msg) {
         const existing = document.getElementById('monowe-toast');
         if (existing) existing.remove();
@@ -832,11 +871,13 @@
             animation: monowe-toast-in 0.2s ease;
             box-shadow: 0 2px 12px rgba(0,212,255,0.3);
         `;
-        const style = document.createElement('style');
-        style.textContent = `@keyframes monowe-toast-in { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }`;
-        document.head.appendChild(style);
+        if (!toastStyleEl) {
+            toastStyleEl = document.createElement('style');
+            toastStyleEl.textContent = `@keyframes monowe-toast-in { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }`;
+            document.head.appendChild(toastStyleEl);
+        }
         document.body.appendChild(toast);
-        setTimeout(() => { toast.remove(); style.remove(); }, 1500);
+        setTimeout(() => toast.remove(), 1500);
     }
 
     function toggleSettingsPanel() {
@@ -897,6 +938,11 @@
                     style="min-width:50px">${settings.showCountry ? 'On' : 'Off'}</button>
             </div>
             <div class="monowe-settings-row">
+                <span>Wikipedia</span>
+                <button data-setting="showWikipedia" class="${settings.showWikipedia ? 'active' : ''}"
+                    style="min-width:50px">${settings.showWikipedia ? 'On' : 'Off'}</button>
+            </div>
+            <div class="monowe-settings-row">
                 <span>Compact</span>
                 <button data-setting="compactMode" class="${settings.compactMode ? 'active' : ''}"
                     style="min-width:50px">${settings.compactMode ? 'On' : 'Off'}</button>
@@ -907,7 +953,7 @@
             </div>
             <div class="monowe-settings-row">
                 <span>Hotkey</span>
-                <span style="color:${c.accent};font-size:0.72rem;font-family:monospace">${settings.hotkey.replace('Key','')}</span>
+                <button id="monowe-hotkey-btn" title="Click, then press a key">${settings.hotkey.replace('Key','')}</button>
             </div>
             <div style="height:1px;background:${c.border};margin:8px 0;"></div>
             <div class="monowe-settings-row">
@@ -920,8 +966,7 @@
         const minimap = document.getElementById('monowe-minimap');
         const rect = minimap.getBoundingClientRect();
         panel.style.position = 'fixed';
-        // Position above minimap, but if not enough space, position below
-        const panelHeight = 400; // approximate
+        const panelHeight = 400;
         const spaceAbove = rect.top;
         if (spaceAbove > panelHeight + 10) {
             panel.style.bottom = (window.innerHeight - rect.top + 8) + 'px';
@@ -1001,6 +1046,17 @@
                 toggleSettingsPanel();
             });
         }
+        const wikiToggleBtn = panel.querySelector('[data-setting="showWikipedia"]');
+        if (wikiToggleBtn) {
+            wikiToggleBtn.addEventListener('click', () => {
+                settings.showWikipedia = !settings.showWikipedia;
+                saveSettings();
+                const btn = document.getElementById('monowe-wiki-btn');
+                if (btn) btn.style.display = settings.showWikipedia ? '' : 'none';
+                panel.remove();
+                toggleSettingsPanel();
+            });
+        }
         const compactBtn = panel.querySelector('[data-setting="compactMode"]');
         if (compactBtn) {
             compactBtn.addEventListener('click', () => {
@@ -1018,7 +1074,6 @@
                 saveSettings();
                 panel.remove();
                 toggleSettingsPanel();
-                // Reload map with new provider
                 if (mapObj && mapObj.map) {
                     mapObj.map.eachLayer(layer => { if (layer !== mapObj.marker) mapObj.map.removeLayer(layer); });
                     const provider = MAP_PROVIDERS[settings.mapProvider] || MAP_PROVIDERS.osm;
@@ -1042,6 +1097,25 @@
             historyBtn.addEventListener('click', () => {
                 panel.remove();
                 showHistoryPanel();
+            });
+        }
+        const hotkeyBtn = panel.querySelector('#monowe-hotkey-btn');
+        if (hotkeyBtn) {
+            hotkeyBtn.addEventListener('click', () => {
+                hotkeyBtn.textContent = 'press...';
+                const capture = (e) => {
+                    document.removeEventListener('keydown', capture, true);
+                    if (!document.body.contains(hotkeyBtn)) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (e.code !== 'Escape') {
+                        settings.hotkey = e.code;
+                        saveSettings();
+                        showToast('Hotkey: ' + e.code.replace('Key', ''));
+                    }
+                    hotkeyBtn.textContent = settings.hotkey.replace('Key', '');
+                };
+                document.addEventListener('keydown', capture, true);
             });
         }
         const resetBtn = panel.querySelector('#monowe-reset-settings');
@@ -1094,29 +1168,9 @@
         });
         document.body.appendChild(panel);
 
-        // Make history panel draggable
         const header = panel.querySelector('#monowe-history-header');
-        let isDragging = false, offsetX, offsetY;
-        header.addEventListener('mousedown', (e) => {
-            if (e.target.tagName === 'BUTTON') return;
-            isDragging = true;
-            const rect = panel.getBoundingClientRect();
-            offsetX = e.clientX - rect.left;
-            offsetY = e.clientY - rect.top;
-            panel.style.transform = 'none';
-            panel.style.transition = 'none';
-        });
-        document.addEventListener('mousemove', (e) => {
-            if (!isDragging) return;
-            panel.style.left = (e.clientX - offsetX) + 'px';
-            panel.style.top = (e.clientY - offsetY) + 'px';
-        });
-        document.addEventListener('mouseup', () => {
-            if (isDragging) {
-                isDragging = false;
-                panel.style.transition = '';
-            }
-        });
+        const removeDrag = makeDraggable(header, panel);
+        const closePanel = () => { removeDrag(); panel.remove(); };
 
         const list = panel.querySelector('#monowe-history-list');
         if (locationHistory.length === 0) {
@@ -1141,17 +1195,17 @@
                         mapObj.map.setView([h.lat, h.lng], 12, { animate: true });
                         mapObj.marker.setLatLng([h.lat, h.lng]);
                     }
-                    panel.remove();
+                    closePanel();
                 });
                 list.appendChild(item);
             }
         }
 
-        document.getElementById('monowe-close-history').addEventListener('click', () => panel.remove());
+        document.getElementById('monowe-close-history').addEventListener('click', closePanel);
         document.getElementById('monowe-clear-history').addEventListener('click', () => {
             locationHistory = [];
             saveHistory();
-            panel.remove();
+            closePanel();
         });
         document.getElementById('monowe-export-history').addEventListener('click', () => {
             const csv = 'lat,lng,name,country,time\n' + locationHistory.map(h =>
@@ -1204,6 +1258,7 @@
                     <span id="monowe-location-name" class="monowe-loc-name" title="Click to copy">...</span>
                 </div>
                 <div class="monowe-header-right">
+                    <button id="monowe-wiki-btn" title="Open in Wikipedia" style="display:${settings.showWikipedia ? '' : 'none'}">&#128214;</button>
                     <button id="monowe-settings-btn" title="Settings">&#9881;</button>
                     <button id="monowe-map-toggle" title="Toggle map">&#8722;</button>
                 </div>
@@ -1229,13 +1284,20 @@
             const collapsed = mapBody.classList.toggle('collapsed');
             const coordsEl = document.getElementById('monowe-coords-bar');
             if (coordsEl) coordsEl.style.display = collapsed ? 'none' : '';
-            toggleBtn.textContent = collapsed ? '+' : '&#8722;';
+            toggleBtn.textContent = collapsed ? '+' : '\u2212';
             if (!collapsed) applySize();
         });
 
         settingsBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             toggleSettingsPanel();
+        });
+
+        const wikiBtn = document.getElementById('monowe-wiki-btn');
+        wikiBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (!lastPlace.name) { showToast('No location yet'); return; }
+            window.open(getWikipediaLink(lastPlace.name, lastPlace.country), '_blank');
         });
 
         coordsBar.addEventListener('click', (e) => {
@@ -1253,32 +1315,11 @@
             }
         });
 
-        let isDragging = false, offsetX, offsetY;
-        container.addEventListener('mousedown', (e) => {
-            if (e.target.tagName === 'BUTTON' || e.target.closest('.monowe-coords')) return;
-            isDragging = true;
-            offsetX = e.clientX - container.getBoundingClientRect().left;
-            offsetY = e.clientY - container.getBoundingClientRect().top;
-            container.style.transition = 'none';
-        });
-        document.addEventListener('mousemove', (e) => {
-            if (!isDragging) return;
-            container.style.left = (e.clientX - offsetX) + 'px';
-            container.style.top = (e.clientY - offsetY) + 'px';
-            container.style.right = 'auto';
-            container.style.bottom = 'auto';
-        });
-        document.addEventListener('mouseup', () => {
-            if (isDragging) {
-                isDragging = false;
-                container.style.transition = '';
-            }
-        });
+        makeDraggable(container, container, '.monowe-coords');
 
         return container;
     }
 
-    // ─── FALLBACK MAP ────────────────────────────────────────────
     function createFallbackMap(coords) {
         const c = getThemeColors();
         const container = document.getElementById('monowe-minimap');
@@ -1297,7 +1338,6 @@
         }
     }
 
-    // ─── MAP INITIALIZATION ──────────────────────────────────────
     async function initLeafletMap() {
         try {
             await loadLeaflet();
@@ -1313,7 +1353,12 @@
                 attributionControl: false,
             }).setView([20, 0], 5);
 
-            // Try selected provider, fallback to OSM
+            const startKm = 10;
+            const startLat = 20, startLng = 0;
+            const dLat = (startKm / 2) / 111.32;
+            const dLng = (startKm / 2) / (111.32 * Math.cos(startLat * Math.PI / 180));
+            map.fitBounds([[startLat - dLat, startLng - dLng], [startLat + dLat, startLng + dLng]]);
+
             let provider = MAP_PROVIDERS[settings.mapProvider] || MAP_PROVIDERS.osm;
             try {
                 L.tileLayer(provider.url, {
@@ -1355,8 +1400,8 @@
         if (coordsText) coordsText.textContent = formatCoord(coords.lat, coords.lng);
     }
 
-    // ─── REVERSE GEOCODING ───────────────────────────────────────
     let lastGeocoded = null;
+    let lastPlace = { name: '', country: '' };
 
     const reverseGeocode = throttle(async (lat, lng) => {
         const key = lat.toFixed(3) + ',' + lng.toFixed(3);
@@ -1365,8 +1410,7 @@
 
         try {
             const resp = await fetch(
-                'https://nominatim.openstreetmap.org/reverse?format=json&lat=' + lat + '&lon=' + lng + '&zoom=10&accept-language=en',
-                { headers: { 'User-Agent': 'monowe-openguessr/3.0' } }
+                'https://nominatim.openstreetmap.org/reverse?format=json&lat=' + lat + '&lon=' + lng + '&zoom=10&accept-language=en'
             );
             const data = await resp.json();
             const el = document.getElementById('monowe-location-name');
@@ -1382,7 +1426,8 @@
             if (city && country && city !== country) label = city + ', ' + country;
             else if (region && country && region !== country) label = region + ', ' + country;
 
-            // Add country flag
+            lastPlace = { name: city || region || country || label, country };
+
             if (settings.showCountry && countryCode) {
                 const flag = getCountryFlag(countryCode);
                 if (flag) label = flag + ' ' + label;
@@ -1391,14 +1436,12 @@
             el.textContent = label;
             el.title = (data.display_name || '') + '\nClick to copy coordinates';
 
-            // Save to history
             addToHistory(lat, lng, data.display_name || label, country);
         } catch (e) {
             log('geocode error:', e);
         }
     }, 1000);
 
-    // ─── HOTKEY ──────────────────────────────────────────────────
     function setupHotkey() {
         document.addEventListener('keydown', (e) => {
             if (e.code === settings.hotkey && !e.ctrlKey && !e.altKey && !e.metaKey) {
@@ -1410,25 +1453,10 @@
         });
     }
 
-    // ─── LEAFLET MAP INTERCEPT ────────────────────────────────────
     let gameMapInstance = null;
 
-    function findButton(texts) {
-        const buttons = document.querySelectorAll('button, .standard-button, [role="button"], div.confirm-button');
-        for (const btn of buttons) {
-            const btnText = (btn.textContent || '').toLowerCase().trim();
-            for (const t of texts) {
-                if (btnText.includes(t.toLowerCase())) return btn;
-            }
-        }
-        return null;
-    }
-
-    // ─── INTERCEPT LEAFLET CLICK HANDLER ─────────────────────────
-    // Hook L.map to capture game map instance
     function hookGameMap() {
-        // Wait for Leaflet to load, then hook
-        const check = setInterval(() => {
+        const check = trackInterval(() => {
             if (!window.L || !window.L.map) return;
             clearInterval(check);
 
@@ -1447,7 +1475,6 @@
             };
             window.L.map.prototype = origMap.prototype;
 
-            // Also scan for already-created maps
             scanExistingMaps();
         }, 300);
     }
@@ -1455,11 +1482,9 @@
     function scanExistingMaps() {
         if (!window.L) return;
 
-        // Method: scan all elements for Leaflet map instances
         const containers = document.querySelectorAll('.leaflet-container, #map');
         for (const container of containers) {
             if (container._leaflet_id !== undefined) {
-                // Check all properties
                 for (const key of Object.getOwnPropertyNames(container)) {
                     try {
                         const val = container[key];
@@ -1471,7 +1496,6 @@
                     } catch {}
                 }
 
-                // Check _leaflet_map on all children
                 const children = container.querySelectorAll('*');
                 for (const child of children) {
                     for (const key of Object.getOwnPropertyNames(child)) {
@@ -1487,7 +1511,6 @@
             }
         }
 
-        // Method: check L namespace for any map-like objects
         for (const key of Object.keys(window.L)) {
             try {
                 const val = window.L[key];
@@ -1505,246 +1528,6 @@
         log('scanExistingMaps: no existing map found');
     }
 
-    function scanForMapInstance(container) {
-        if (!container) return null;
-
-        // Method 1: Direct property scan
-        for (const key of Object.getOwnPropertyNames(container)) {
-            const val = container[key];
-            if (val && typeof val === 'object' && typeof val.getCenter === 'function' && typeof val.getZoom === 'function') {
-                gameMapInstance = val;
-                log('found map via property:', key);
-                return val;
-            }
-        }
-
-        // Method 2: Check _leaflet properties
-        for (const key of Object.keys(container)) {
-            if (key.startsWith('_leaflet')) {
-                const val = container[key];
-                if (val && typeof val === 'object' && val._zoom !== undefined) {
-                    gameMapInstance = val;
-                    log('found map via _leaflet:', key);
-                    return val;
-                }
-            }
-        }
-
-        // Method 3: Scan leaflet panes and controls
-        const elements = container.querySelectorAll('.leaflet-pane, .leaflet-control, .leaflet-tile-pane, .leaflet-overlay-pane, .leaflet-marker-pane');
-        for (const el of elements) {
-            for (const key of Object.getOwnPropertyNames(el)) {
-                try {
-                    const val = el[key];
-                    if (val && typeof val === 'object' && typeof val.getCenter === 'function' && typeof val.getZoom === 'function') {
-                        gameMapInstance = val;
-                        log('found map via element:', el.className, key);
-                        return val;
-                    }
-                    // Also check for _map property (Leaflet stores map ref on layers)
-                    if (val && typeof val === 'object' && val._map && typeof val._map.getCenter === 'function') {
-                        gameMapInstance = val._map;
-                        log('found map via _map on:', el.className, key);
-                        return val._map;
-                    }
-                } catch {}
-            }
-        }
-
-        // Method 4: Access through L's internal stores
-        if (window.L && container._leaflet_id !== undefined) {
-            if (window.L.Map && window.L.Map._maps) {
-                const map = window.L.Map._maps[container._leaflet_id];
-                if (map) {
-                    gameMapInstance = map;
-                    log('found map via L.Map._maps');
-                    return map;
-                }
-            }
-
-            // Check L._maps directly
-            if (window.L._maps) {
-                for (const key in window.L._maps) {
-                    const m = window.L._maps[key];
-                    if (m && m.getContainer && m.getContainer() === container) {
-                        gameMapInstance = m;
-                        log('found map via L._maps');
-                        return m;
-                    }
-                }
-            }
-
-            // Scan ALL elements inside map for _leaflet_map references
-            const allEls = container.querySelectorAll('*');
-            for (const el of allEls) {
-                for (const key of Object.getOwnPropertyNames(el)) {
-                    try {
-                        if (key === '_leaflet_map' || (key.startsWith('_leaflet') && el[key] && typeof el[key].getCenter === 'function')) {
-                            gameMapInstance = el[key];
-                            log('found map via deep scan:', el.tagName, key);
-                            return el[key];
-                        }
-                    } catch {}
-                }
-            }
-        }
-
-        // Method 5: Hook via event listeners
-        if (window.L && window.L.DomEvent && window.L.DomEvent._map) {
-            gameMapInstance = window.L.DomEvent._map;
-            log('found map via L.DomEvent._map');
-            return window.L.DomEvent._map;
-        }
-
-        return null;
-    }
-
-    function findGameMap() {
-        log('findGameMap: searching...');
-        if (gameMapInstance) {
-            try {
-                const center = gameMapInstance.getCenter();
-                log('findGameMap: cached map valid, center:', center.lat.toFixed(4), center.lng.toFixed(4));
-                return gameMapInstance;
-            } catch (e) {
-                log('findGameMap: cached map invalid');
-                gameMapInstance = null;
-            }
-        }
-
-        // Try scanning for maps
-        scanExistingMaps();
-        if (gameMapInstance) {
-            log('findGameMap: found via scanExistingMaps');
-            return gameMapInstance;
-        }
-
-        const mapEl = document.getElementById('map');
-        if (!mapEl) {
-            log('findGameMap: #map NOT FOUND');
-            return null;
-        }
-        log('findGameMap: #map found, _leaflet_id:', mapEl._leaflet_id);
-
-        // Try property scan
-        const found = scanForMapInstance(mapEl);
-        if (found) return found;
-
-        // Method: iterate window properties
-        log('searching window properties...');
-        const windowKeys = Object.getOwnPropertyNames(window);
-        log('window properties count:', windowKeys.length);
-
-        for (const key of windowKeys) {
-            try {
-                const val = window[key];
-                if (val && typeof val === 'object' && typeof val.getCenter === 'function' && typeof val.getZoom === 'function') {
-                    const container = val.getContainer ? val.getContainer() : null;
-                    if (container && container.id === 'map') {
-                        gameMapInstance = val;
-                        log('findGameMap: FOUND via window.' + key);
-                        return val;
-                    }
-                }
-            } catch {}
-        }
-
-        // Method: scan document.querySelectorAll('*') for map-like objects
-        log('scanning DOM elements...');
-        const allElements = document.querySelectorAll('#map *, #map');
-        for (const el of allElements) {
-            for (const key of Object.getOwnPropertyNames(el)) {
-                try {
-                    const val = el[key];
-                    if (val && typeof val === 'object' && typeof val.getCenter === 'function') {
-                        gameMapInstance = val;
-                        log('findGameMap: FOUND via DOM scan on', el.tagName, el.id, key);
-                        return val;
-                    }
-                } catch {}
-            }
-        }
-
-        log('findGameMap: NOT FOUND after all methods');
-        return null;
-    }
-
-    function openGameMap() {
-        log('openGameMap: looking for confirm-button...');
-        const confirmBtn = document.getElementById('confirm-button');
-        if (!confirmBtn) {
-            log('openGameMap: confirm-button NOT FOUND');
-            return false;
-        }
-        log('openGameMap: confirm-button found, text:', confirmBtn.textContent.trim());
-
-        const mapHolder = document.getElementById('map-holder');
-        const isMapVisible = mapHolder && mapHolder.offsetHeight > 0;
-        log('openGameMap: map visible:', isMapVisible, 'height:', mapHolder ? mapHolder.offsetHeight : 'N/A');
-
-        if (!isMapVisible) {
-            log('openGameMap: clicking to open map');
-            confirmBtn.click();
-        } else {
-            log('openGameMap: map already open');
-        }
-        return true;
-    }
-
-    function dispatchMapEvent(container, clientX, clientY, type) {
-        const events = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
-        const useEvents = type === 'all' ? events : [type];
-
-        for (const eventType of useEvents) {
-            const EventClass = eventType.startsWith('pointer') ? PointerEvent : MouseEvent;
-            const event = new EventClass(eventType, {
-                clientX, clientY,
-                bubbles: true,
-                cancelable: true,
-                view: window,
-                button: 0,
-                buttons: eventType.includes('down') ? 1 : 0,
-                pointerId: 1,
-                pointerType: 'mouse',
-            });
-            container.dispatchEvent(event);
-        }
-    }
-
-    function clickGuessButton() {
-        // Look for the confirm button that becomes "Guess" after marker is placed
-        const confirmBtn = document.getElementById('confirm-button');
-        if (confirmBtn) {
-            const text = (confirmBtn.textContent || '').toLowerCase();
-            if (text.includes('guess') || text.includes('submit') || text.includes('confirm')) {
-                log('clicking guess button:', text.trim());
-                confirmBtn.click();
-                return true;
-            }
-        }
-
-        // Search by text
-        const guessBtn = findButton(['guess', 'submit', 'confirm']);
-        if (guessBtn) {
-            log('clicking guess button by text');
-            guessBtn.click();
-            return true;
-        }
-
-        return false;
-    }
-
-    function clickNextButton() {
-        const nextBtn = findButton(['next', 'continue', 'new game', 'play again', 'new round', 'next round']);
-        if (nextBtn) {
-            log('clicking next button');
-            nextBtn.click();
-            return true;
-        }
-        return false;
-    }
-
-    // ─── DEBUG CONSOLE ───────────────────────────────────────────
     let debugConsoleVisible = false;
 
     function createDebugConsole() {
@@ -1778,34 +1561,9 @@
         });
         document.body.appendChild(container);
 
-        // Drag functionality
         const header = document.getElementById('monowe-debug-header');
-        let isDragging = false, dragOffsetX, dragOffsetY;
+        makeDraggable(header, container);
 
-        header.addEventListener('mousedown', (e) => {
-            if (e.target.tagName === 'BUTTON') return;
-            isDragging = true;
-            dragOffsetX = e.clientX - container.getBoundingClientRect().left;
-            dragOffsetY = e.clientY - container.getBoundingClientRect().top;
-            container.style.transition = 'none';
-        });
-
-        document.addEventListener('mousemove', (e) => {
-            if (!isDragging) return;
-            container.style.left = (e.clientX - dragOffsetX) + 'px';
-            container.style.top = (e.clientY - dragOffsetY) + 'px';
-            container.style.right = 'auto';
-            container.style.bottom = 'auto';
-        });
-
-        document.addEventListener('mouseup', () => {
-            if (isDragging) {
-                isDragging = false;
-                container.style.transition = '';
-            }
-        });
-
-        // Resize functionality
         const resizeHandle = document.getElementById('monowe-debug-resize');
         let isResizing = false, startW, startH, startX, startY;
 
@@ -1832,13 +1590,11 @@
             isResizing = false;
         });
 
-        // Close button
         document.getElementById('monowe-debug-close').addEventListener('click', () => {
             debugConsoleVisible = false;
             container.style.display = 'none';
         });
 
-        // Clear button
         document.getElementById('monowe-debug-clear').addEventListener('click', () => {
             debugLogs.length = 0;
             const output = document.getElementById('monowe-debug-output');
@@ -1849,10 +1605,10 @@
     }
 
     function toggleDebugConsole() {
-        let console = document.getElementById('monowe-debug-console');
-        if (!console) console = createDebugConsole();
+        const panel = document.getElementById('monowe-debug-console');
+        if (!panel) createDebugConsole();
         debugConsoleVisible = !debugConsoleVisible;
-        console.style.display = debugConsoleVisible ? 'block' : 'none';
+        panel.style.display = debugConsoleVisible ? 'block' : 'none';
         if (debugConsoleVisible) updateDebugConsole();
     }
 
@@ -1871,7 +1627,6 @@
         output.scrollTop = output.scrollHeight;
     }
 
-    // Add debug button to minimap header
     function addDebugButton() {
         const headerRight = document.querySelector('.monowe-header-right');
         if (!headerRight || document.getElementById('monowe-debug-btn')) return;
@@ -1888,28 +1643,22 @@
         headerRight.insertBefore(btn, headerRight.firstChild);
     }
 
-    // ─── MAIN ────────────────────────────────────────────────────
     let mapObj = null;
 
     async function main() {
-        log('script starting... v2.0');
+        log('script starting...');
 
         listeners.push((coords) => {
             if (mapObj) updateMap(mapObj, coords);
             reverseGeocode(coords.lat, coords.lng);
         });
 
-        hookNetwork();
-        hookJSONP();
-        hookIframes();
-        hookGoogleMapsAPI();
-        hookGameMap();
         setupHotkey();
 
-        // Monitor ALL network requests via PerformanceObserver
         try {
             const observer = new PerformanceObserver((list) => {
                 for (const entry of list.getEntries()) {
+                    if (BINARY_URL_RE.test(entry.name)) continue;
                     log('NET:', entry.initiatorType, entry.name.substring(0, 150));
                 }
             });
@@ -1934,9 +1683,14 @@
         setTimeout(scanPageHTML, 3000);
         setTimeout(scanPageHTML, 6000);
 
-        // Reposition settings panel on window resize
         window.addEventListener('resize', repositionSettingsPanel);
     }
+
+    hookNetwork();
+    hookJSONP();
+    hookIframes();
+    hookGoogleMapsAPI();
+    hookGameMap();
 
     if (document.readyState === 'complete' || document.readyState === 'interactive') {
         main();
